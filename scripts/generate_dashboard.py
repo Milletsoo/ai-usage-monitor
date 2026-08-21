@@ -513,19 +513,19 @@ def collect_errors():
                         created_dt = ""
                         hour = 0
                         date = ""
-                    # 分类
+                    # 分类 + 小白翻译
                     if "429" in err_msg:
-                        err_type = "429 限流"
+                        err_type = "请求太频繁被限流"
                     elif "404" in err_msg:
-                        err_type = "404 模型不存在"
+                        err_type = "模型不存在或已下线"
                     elif any(x in err_msg for x in ["500", "502", "503"]):
-                        err_type = "5xx 服务器错误"
+                        err_type = "服务器出了内部问题"
                     elif "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
-                        err_type = "超时"
+                        err_type = "请求超时没响应"
                     elif "connection" in err_msg.lower():
-                        err_type = "连接错误"
+                        err_type = "网络连接断了"
                     else:
-                        err_type = "其他"
+                        err_type = "其他未知错误"
                     errors.append({
                         "tool": "Claude Code", "session": sid, "model": last_model,
                         "type": err_type, "message": err_msg[:200],
@@ -559,11 +559,11 @@ def collect_errors():
                         hour = 0
                         date = ""
                     if "429" in err_msg:
-                        err_type = "429 限流"
+                        err_type = "请求太频繁被限流"
                     elif "404" in err_msg:
-                        err_type = "404 模型不存在"
+                        err_type = "模型不存在或已下线"
                     else:
-                        err_type = "其他"
+                        err_type = "其他未知错误"
                     errors.append({
                         "tool": "Proma", "session": sid, "model": "(compaction)",
                         "type": err_type, "message": err_msg[:200],
@@ -1156,15 +1156,23 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
   <div class="table-container"><div class="table-header"><h3>🚨 调用稳定性监控</h3><span id="errors-summary" class="text-dim"></span></div>
   <div class="table-wrap"><table><thead><tr>
     <th onclick="sortTable('errors-tbody',0)">模型</th>
-    <th onclick="sortTable('errors-tbody',1)" class="num">错误次数</th>
-    <th onclick="sortTable('errors-tbody',2)" class="num">主要类型</th>
-    <th onclick="sortTable('errors-tbody',3)" class="num">占比</th>
+    <th onclick="sortTable('errors-tbody',1)" class="num">失败次数</th>
+    <th onclick="sortTable('errors-tbody',2)">主要原因</th>
+    <th onclick="sortTable('errors-tbody',3)" class="num">占全部失败的比例</th>
   </tr></thead><tbody id="errors-tbody"></tbody></table></div></div>
-  <div class="chart-container"><h3>⏰ 24小时错误分布</h3><div class="bar-chart" id="error-hour-chart" style="justify-content:center;"></div><div class="chart-labels" id="error-hour-labels" style="justify-content:center;"></div></div>
-  <div class="table-container"><div class="table-header"><h3>📋 错误明细 (最近 100 条)</h3></div>
+  <div class="chart-container"><h3>⏰ 哪个时间段最容易失败</h3><div class="bar-chart" id="error-hour-chart" style="justify-content:center;"></div><div class="chart-labels" id="error-hour-labels" style="justify-content:center;"></div></div>
+  <div class="table-container"><div class="table-header"><h3>📋 失败明细 (最近 100 条)</h3></div>
   <div class="table-wrap"><table><thead><tr>
-    <th>时间</th><th>工具</th><th>模型</th><th>错误类型</th><th>错误信息</th>
+    <th>时间</th><th>工具</th><th>模型</th><th>失败原因</th><th>详细信息</th>
   </tr></thead><tbody id="error-detail-tbody"></tbody></table></div></div>
+  <div style="font-size:12px;color:var(--text-dim);padding:12px 0;line-height:1.6;">
+    💡 <strong>小白翻译</strong>：<br>
+    • <strong>请求太频繁被限流</strong>＝你一分钟内调了太多次，服务器把你拦下来了，等一会儿就好<br>
+    • <strong>模型不存在或已下线</strong>＝你要用的模型名字写错了，或者这个模型已经被收回了<br>
+    • <strong>服务器出了内部问题</strong>＝不是你的问题，是对方服务器崩了<br>
+    • <strong>请求超时没响应</strong>＝等太久没回结果，可能是任务太重或网络不好<br>
+    • <strong>网络连接断了</strong>＝本地网断了或者连不上中转站
+  </div>
 </div>
 
 <!-- v2.0: 性价比分析 -->
@@ -1308,26 +1316,22 @@ function renderPricing() {{
   }}).join('');
 }}
 
-// ── v2.0: 调用稳定性 ──
+// ── 调用稳定性 ──
 function renderErrors() {{
   const errors = ALL_DATA.errors || [];
   const total = errors.length;
-  document.getElementById('errors-summary').textContent = total > 0 ? `共 ${{total}} 次错误` : '';
-  // 按模型统计
+  document.getElementById('errors-summary').textContent = total > 0 ? `共 ${{total}} 次失败` : '';
   const byModel = {{}};
   errors.forEach(e => {{ if(!byModel[e.model]) byModel[e.model] = {{count:0, types:{{}}}}; byModel[e.model].count++; byModel[e.model].types[e.type]=(byModel[e.model].types[e.type]||0)+1; }});
   const arr = Object.entries(byModel).map(([m,v])=>({{model:m,count:v.count,mainType:Object.entries(v.types).sort((a,b)=>b[1]-a[1])[0][0],pct:Math.round(v.count/total*100)}})).sort((a,b)=>b.count-a.count);
-  document.getElementById('errors-tbody').innerHTML = arr.map(e=>`<tr><td><strong>${{esc(e.model)}}</strong></td><td class="num text-red">${{e.count}}</td><td>${{esc(e.mainType)}}</td><td class="num">${{e.pct}}%</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim);padding:30px;">暂无错误记录</td></tr>';
-  // 24h 分布
+  document.getElementById('errors-tbody').innerHTML = arr.map(e=>`<tr><td><strong>${{esc(e.model)}}</strong></td><td class="num text-red">${{e.count}}</td><td>${{esc(e.mainType)}}</td><td class="num">${{e.pct}}%</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim);padding:30px;">🎉 暂无失败记录！</td></tr>';
   const byHour = Array(24).fill(0);
   errors.forEach(e=>{{ if(e.hour>=0&&e.hour<24) byHour[e.hour]++; }});
   const maxH = Math.max(...byHour) || 1;
-  const colors=['var(--accent)','var(--orange)','var(--red)','var(--purple)'];
-  document.getElementById('error-hour-chart').innerHTML = byHour.map((v,h)=>v>0?`<div class="bar" style="height:${{(v/maxH)*100}}%;background:var(--red);"><span class="bar-label" style="color:var(--red);font-size:9px;">${{v}}</span><div class="bar-tooltip">${{h}}:00 - ${{h+1}}:00<br>${{v}} 次错误</div></div>`:`<div class="bar" style="height:2%;background:var(--card-border);opacity:0.3;"></div>`).join('');
+  document.getElementById('error-hour-chart').innerHTML = byHour.map((v,h)=>v>0?`<div class="bar" style="height:${{(v/maxH)*100}}%;background:var(--red);"><span class="bar-label" style="color:var(--red);font-size:9px;">${{v}}</span><div class="bar-tooltip">${{h}}:00 - ${{h+1}}:00<br>${{v}} 次失败</div></div>`:`<div class="bar" style="height:2%;background:var(--card-border);opacity:0.3;"></div>`).join('');
   document.getElementById('error-hour-labels').innerHTML = byHour.map((v,h)=>h%2===0?`<div class="chart-label">${{String(h).padStart(2,'0')}}</div>`:`<div class="chart-label"></div>`).join('');
-  // 明细 (最近100条)
   const recent = errors.slice(-100).reverse();
-  document.getElementById('error-detail-tbody').innerHTML = recent.map(e=>`<tr><td class="text-dim" style="white-space:nowrap;">${{e.dt}}</td><td>${{toolBadge(e.tool)}}</td><td>${{esc(e.model)}}</td><td><span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);">${{esc(e.type)}}</span></td><td class="text-dim" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${{esc(e.message)}}">${{esc(e.message)}}</td></tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:30px;">暂无错误记录</td></tr>';
+  document.getElementById('error-detail-tbody').innerHTML = recent.map(e=>`<tr><td class="text-dim" style="white-space:nowrap;">${{e.dt}}</td><td>${{toolBadge(e.tool)}}</td><td>${{esc(e.model)}}</td><td><span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);">${{esc(e.type)}}</span></td><td class="text-dim" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${{esc(e.message)}}">${{esc(e.message)}}</td></tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:30px;">🎉 暂无失败记录</td></tr>';
 }}
 
 // ── v2.0: 性价比分析 ──
