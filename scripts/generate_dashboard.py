@@ -739,7 +739,7 @@ def generate_html(sessions, turns, unmatched_models, pricing_data):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="refresh" content="10">
+<!-- 自动刷新由 JS 控制，不使用 meta refresh 以保留用户当前页面状态 -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 <title>AI Coding 平台 Token 用量看板</title>
 <style>
@@ -874,7 +874,8 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
 
 <script>
 const ALL_DATA = {all_data};
-let currentRange = 'week';
+let currentRange = localStorage.getItem('usage_range') || 'week';
+let currentTab = localStorage.getItem('usage_tab') || 'turns';
 
 function getRangeTs(range) {{
   const now = new Date();
@@ -886,6 +887,7 @@ function getRangeTs(range) {{
 }}
 function setTimeRange(range, btn) {{
   currentRange = range;
+  localStorage.setItem('usage_range', range);
   document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   renderAll();
@@ -980,11 +982,31 @@ function renderPricing() {{
 }}
 
 function renderAll() {{ renderOverview(); renderChart(); renderTurns(); renderSessions(); renderModels(); renderPricing(); }}
-function switchTab(tabId, btn) {{ document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tabId).classList.add('active'); }}
+function switchTab(tabId, btn) {{ document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tabId).classList.add('active'); localStorage.setItem('usage_tab', tabId); }}
 function filterTable(tbodyId, query) {{ const tbody=document.getElementById(tbodyId); const q=query.toLowerCase(); tbody.querySelectorAll('tr').forEach(tr=>{{ tr.style.display=tr.textContent.toLowerCase().includes(q)?'':'none'; }}); }}
 let sortStates={{}};
 function sortTable(tbodyId, colIdx) {{ const tbody=document.getElementById(tbodyId); if(!tbody) return; const rows=Array.from(tbody.querySelectorAll('tr')); const key=tbodyId+'-'+colIdx; const asc=sortStates[key]=!sortStates[key]; rows.sort((a,b)=>{{ let va=a.children[colIdx].textContent.replace(/[,¥$%]/g,'').trim(); let vb=b.children[colIdx].textContent.replace(/[,¥$%]/g,'').trim(); const na=parseFloat(va),nb=parseFloat(vb); if(!isNaN(na)&&!isNaN(nb)) return asc?na-nb:nb-na; return asc?va.localeCompare(vb):vb.localeCompare(va); }}); rows.forEach(r=>tbody.appendChild(r)); }}
+// 恢复用户上次的 Tab 和时间范围
+(function() {
+  document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+  const rangeMap = {today:0, week:1, month:2, all:3};
+  const btnIdx = rangeMap[currentRange];
+  const rangeBtns = document.querySelectorAll('.time-btn');
+  if (btnIdx != null && rangeBtns[btnIdx]) rangeBtns[btnIdx].classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  const tabMap = {turns:0, sessions:1, models:2, pricing:3};
+  const tabIdx = tabMap[currentTab] != null ? tabMap[currentTab] : 0;
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  if (tabIdx != null && tabBtns[tabIdx]) tabBtns[tabIdx].classList.add('active');
+  const tabEl = document.getElementById('tab-' + currentTab) || document.getElementById('tab-turns');
+  if (tabEl) tabEl.classList.add('active');
+})();
+
 renderAll();
+
+// JS 静默刷新：每 30 秒重新加载页面，状态通过 localStorage 保留
+setTimeout(function() { location.reload(); }, 30000);
 </script>
 </body></html>"""
     return html
