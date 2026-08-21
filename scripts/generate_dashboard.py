@@ -475,6 +475,175 @@ def merge_sub_agents(sessions, child_to_parent, parent_titles):
     return merged_sessions
 
 
+# ── v2.0: 错误数据采集 ────────────────────────────────
+def collect_errors():
+    """采集 Claude Code 的 API 错误 + Proma 的压缩失败"""
+    errors = []
+
+    # Claude Code api_error
+    cc_files = [f for f in glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "**/*.jsonl"), recursive=True)
+                if "subagents" not in f and "\\subagents\\" not in f]
+    for fpath in sorted(cc_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")[:8]
+        last_model = "unknown"
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "assistant":
+                    m = d.get("message", {}).get("model")
+                    if m:
+                        last_model = m
+                elif d.get("type") == "system" and d.get("subtype") == "api_error":
+                    err_msg = d.get("error", {}).get("message", "")
+                    ts_str = d.get("timestamp", "")
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        created_ms = int(dt.timestamp() * 1000)
+                        created_dt = dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        hour = dt.astimezone(TZ).hour
+                        date = dt.astimezone(TZ).strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        created_ms = 0
+                        created_dt = ""
+                        hour = 0
+                        date = ""
+                    # 分类 + 小白翻译
+                    if "429" in err_msg:
+                        err_type = "请求太频繁被限流"
+                    elif "404" in err_msg:
+                        err_type = "模型不存在或已下线"
+                    elif any(x in err_msg for x in ["500", "502", "503"]):
+                        err_type = "服务器出了内部问题"
+                    elif "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                        err_type = "请求超时没响应"
+                    elif "connection" in err_msg.lower():
+                        err_type = "网络连接断了"
+                    else:
+                        err_type = "其他未知错误"
+                    errors.append({
+                        "tool": "Claude Code", "session": sid, "model": last_model,
+                        "type": err_type, "message": err_msg[:200],
+                        "created_ms": created_ms, "created_dt": created_dt,
+                        "hour": hour, "date": date,
+                    })
+
+    # Proma compaction failures
+    proma_files = glob.glob(os.path.join(PROMA_SESSIONS_DIR, "*.jsonl"))
+    for fpath in sorted(proma_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")[:8]
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "system" and d.get("compact_result") == "failed":
+                    err_msg = d.get("compact_error", "")
+                    created_ms = d.get("_createdAt", 0)
+                    if created_ms:
+                        dt = datetime.fromtimestamp(created_ms / 1000, tz=TZ)
+                        created_dt = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        hour = dt.hour
+                        date = dt.strftime("%Y-%m-%d")
+                    else:
+                        created_dt = ""
+                        hour = 0
+                        date = ""
+                    if "429" in err_msg:
+                        err_type = "请求太频繁被限流"
+                    elif "404" in err_msg:
+                        err_type = "模型不存在或已下线"
+                    else:
+                        err_type = "其他未知错误"
+                    errors.append({
+                        "tool": "Proma", "session": sid, "model": "(compaction)",
+                        "type": err_type, "message": err_msg[:200],
+                        "created_ms": created_ms, "created_dt": created_dt,
+                        "hour": hour, "date": date,
+                    })
+
+    return errors
+
+
+# ── v2.0: 工具使用统计 ────────────────────────────────
+def collect_tool_usage():
+    """统计各模型使用的工具类型分布"""
+    model_tools = defaultdict(lambda: defaultdict(int))
+    session_tools = defaultdict(lambda: {"tools": defaultdict(int), "tool_count": 0, "thinking_count": 0})
+
+    # Claude Code
+    cc_files = [f for f in glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "**/*.jsonl"), recursive=True)
+                if "subagents" not in f and "\\subagents\\" not in f]
+    for fpath in sorted(cc_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "assistant":
+                    msg = d.get("message", {})
+                    model = msg.get("model", "unknown")
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                ct = c.get("type", "")
+                                if ct == "tool_use":
+                                    tool_name = c.get("name", "unknown")
+                                    model_tools[model][tool_name] += 1
+                                    session_tools[sid]["tools"][tool_name] += 1
+                                    session_tools[sid]["tool_count"] += 1
+                                elif ct == "thinking":
+                                    session_tools[sid]["thinking_count"] += 1
+
+    # Proma
+    proma_files = glob.glob(os.path.join(PROMA_SESSIONS_DIR, "*.jsonl"))
+    for fpath in sorted(proma_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "assistant":
+                    msg = d.get("message", {})
+                    model = msg.get("model", "unknown")
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                ct = c.get("type", "")
+                                if ct == "tool_use":
+                                    tool_name = c.get("name", "unknown")
+                                    model_tools[model][tool_name] += 1
+                                    session_tools[sid]["tools"][tool_name] += 1
+                                    session_tools[sid]["tool_count"] += 1
+                                elif ct == "thinking":
+                                    session_tools[sid]["thinking_count"] += 1
+
+    return model_tools, session_tools
+
+
+
+
 # ── Prompt 合并 ──────────────────────────────────────
 def merge_turns_by_prompt(turns):
     """将同一会话内相同 prompt 的多次 API 调用合并为一条"""
@@ -565,7 +734,12 @@ def collect_all(pricing_data):
 
     all_sessions.sort(key=lambda x: x.get("first_created", 0), reverse=True)
     all_turns.sort(key=lambda x: x.get("created_ms", 0), reverse=True)
-    return all_sessions, all_turns, all_unmatched
+    
+    # v2.0: 采集错误数据和工具使用统计
+    errors = collect_errors()
+    model_tools, session_tools = collect_tool_usage()
+    
+    return all_sessions, all_turns, all_unmatched, errors, model_tools, session_tools
 
 
 def merge_sub_agents_turns(turns, child_to_parent, parent_titles):
@@ -666,7 +840,7 @@ def esc(text):
     return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def generate_html(sessions, turns, unmatched_models, pricing_data):
+def generate_html(sessions, turns, unmatched_models, pricing_data, errors, model_tools, session_tools):
     now = datetime.now(TZ)
     gen_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -729,7 +903,20 @@ def generate_html(sessions, turns, unmatched_models, pricing_data):
             "tier_threshold": m.get("tier_threshold"), "peak_hours": m.get("peak_hours"),
         })
 
-    all_data = json.dumps({"turns": turns_js, "sessions": sessions_js, "pricing": pricing_js}, ensure_ascii=False)
+    # v2.0 数据
+    errors_js = [{
+        "tool": e.get("tool", ""), "session": e.get("session", ""),
+        "model": e.get("model", ""), "type": e.get("type", ""),
+        "message": e.get("message", ""), "dt": e.get("created_dt", ""),
+        "hour": e.get("hour", 0), "date": e.get("date", ""), "ts": e.get("created_ms", 0),
+    } for e in errors]
+    
+    model_tools_js = {m: dict(tools) for m, tools in model_tools.items()}
+    
+    all_data = json.dumps({
+        "turns": turns_js, "sessions": sessions_js, "pricing": pricing_js,
+        "errors": errors_js, "model_tools": model_tools_js,
+    }, ensure_ascii=False)
 
     total_sessions = len(sessions)
     total_turns = len(turns)
@@ -825,6 +1012,8 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
   <button class="tab-btn" onclick="switchTab('sessions',this)">按会话统计</button>
   <button class="tab-btn" onclick="switchTab('models',this)">按模型统计</button>
   <button class="tab-btn" onclick="switchTab('pricing',this)">模型价格表</button>
+  <button class="tab-btn" onclick="switchTab('errors',this)">🚨 调用稳定性</button>
+
 </div>
 
 <!-- 每次任务 -->
@@ -871,6 +1060,31 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
   </tr></thead><tbody id="pricing-tbody"></tbody></table></div></div>
   <div style="font-size:12px;color:var(--text-dim);padding:12px 0;">💡 分层计价按每轮输入上下文长度判定；峰谷计价按调用时间(8-22点高峰)判定。分层/峰谷显示为 低/高 或 谷/峰。</div>
 </div>
+
+<!-- v2.0: 调用稳定性 -->
+<div class="tab-content" id="tab-errors">
+  <div class="table-container"><div class="table-header"><h3>🚨 调用稳定性监控</h3><span id="errors-summary" class="text-dim"></span></div>
+  <div class="table-wrap"><table><thead><tr>
+    <th onclick="sortTable('errors-tbody',0)">模型</th>
+    <th onclick="sortTable('errors-tbody',1)" class="num">失败次数</th>
+    <th onclick="sortTable('errors-tbody',2)">主要原因</th>
+    <th onclick="sortTable('errors-tbody',3)" class="num">占全部失败的比例</th>
+  </tr></thead><tbody id="errors-tbody"></tbody></table></div></div>
+  <div class="chart-container"><h3>⏰ 哪个时间段最容易失败</h3><div class="bar-chart" id="error-hour-chart" style="justify-content:center;"></div><div class="chart-labels" id="error-hour-labels" style="justify-content:center;"></div></div>
+  <div class="table-container"><div class="table-header"><h3>📋 失败明细 (最近 100 条)</h3></div>
+  <div class="table-wrap"><table><thead><tr>
+    <th>时间</th><th>工具</th><th>模型</th><th>失败原因</th><th>详细信息</th>
+  </tr></thead><tbody id="error-detail-tbody"></tbody></table></div></div>
+  <div style="font-size:12px;color:var(--text-dim);padding:12px 0;line-height:1.6;">
+    💡 <strong>小白翻译</strong>：<br>
+    • <strong>请求太频繁被限流</strong>＝你一分钟内调了太多次，服务器把你拦下来了，等一会儿就好<br>
+    • <strong>模型不存在或已下线</strong>＝你要用的模型名字写错了，或者这个模型已经被收回了<br>
+    • <strong>服务器出了内部问题</strong>＝不是你的问题，是对方服务器崩了<br>
+    • <strong>请求超时没响应</strong>＝等太久没回结果，可能是任务太重或网络不好<br>
+    • <strong>网络连接断了</strong>＝本地网断了或者连不上中转站
+  </div>
+</div>
+
 
 <script>
 const ALL_DATA = {all_data};
@@ -981,32 +1195,51 @@ function renderPricing() {{
   }}).join('');
 }}
 
-function renderAll() {{ renderOverview(); renderChart(); renderTurns(); renderSessions(); renderModels(); renderPricing(); }}
+// ── 调用稳定性 ──
+function renderErrors() {{
+  const errors = ALL_DATA.errors || [];
+  const total = errors.length;
+  document.getElementById('errors-summary').textContent = total > 0 ? `共 ${{total}} 次失败` : '';
+  const byModel = {{}};
+  errors.forEach(e => {{ if(!byModel[e.model]) byModel[e.model] = {{count:0, types:{{}}}}; byModel[e.model].count++; byModel[e.model].types[e.type]=(byModel[e.model].types[e.type]||0)+1; }});
+  const arr = Object.entries(byModel).map(([m,v])=>({{model:m,count:v.count,mainType:Object.entries(v.types).sort((a,b)=>b[1]-a[1])[0][0],pct:Math.round(v.count/total*100)}})).sort((a,b)=>b.count-a.count);
+  document.getElementById('errors-tbody').innerHTML = arr.map(e=>`<tr><td><strong>${{esc(e.model)}}</strong></td><td class="num text-red">${{e.count}}</td><td>${{esc(e.mainType)}}</td><td class="num">${{e.pct}}%</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim);padding:30px;">🎉 暂无失败记录！</td></tr>';
+  const byHour = Array(24).fill(0);
+  errors.forEach(e=>{{ if(e.hour>=0&&e.hour<24) byHour[e.hour]++; }});
+  const maxH = Math.max(...byHour) || 1;
+  document.getElementById('error-hour-chart').innerHTML = byHour.map((v,h)=>v>0?`<div class="bar" style="height:${{(v/maxH)*100}}%;background:var(--red);"><span class="bar-label" style="color:var(--red);font-size:9px;">${{v}}</span><div class="bar-tooltip">${{h}}:00 - ${{h+1}}:00<br>${{v}} 次失败</div></div>`:`<div class="bar" style="height:2%;background:var(--card-border);opacity:0.3;"></div>`).join('');
+  document.getElementById('error-hour-labels').innerHTML = byHour.map((v,h)=>h%2===0?`<div class="chart-label">${{String(h).padStart(2,'0')}}</div>`:`<div class="chart-label"></div>`).join('');
+  const recent = errors.slice(-100).reverse();
+  document.getElementById('error-detail-tbody').innerHTML = recent.map(e=>`<tr><td class="text-dim" style="white-space:nowrap;">${{e.dt}}</td><td>${{toolBadge(e.tool)}}</td><td>${{esc(e.model)}}</td><td><span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);">${{esc(e.type)}}</span></td><td class="text-dim" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${{esc(e.message)}}">${{esc(e.message)}}</td></tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:30px;">🎉 暂无失败记录</td></tr>';
+}}
+
+
+function renderAll() {{ renderOverview(); renderChart(); renderTurns(); renderSessions(); renderModels(); renderPricing(); renderErrors();  }}
 function switchTab(tabId, btn) {{ document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tabId).classList.add('active'); localStorage.setItem('usage_tab', tabId); }}
 function filterTable(tbodyId, query) {{ const tbody=document.getElementById(tbodyId); const q=query.toLowerCase(); tbody.querySelectorAll('tr').forEach(tr=>{{ tr.style.display=tr.textContent.toLowerCase().includes(q)?'':'none'; }}); }}
 let sortStates={{}};
 function sortTable(tbodyId, colIdx) {{ const tbody=document.getElementById(tbodyId); if(!tbody) return; const rows=Array.from(tbody.querySelectorAll('tr')); const key=tbodyId+'-'+colIdx; const asc=sortStates[key]=!sortStates[key]; rows.sort((a,b)=>{{ let va=a.children[colIdx].textContent.replace(/[,¥$%]/g,'').trim(); let vb=b.children[colIdx].textContent.replace(/[,¥$%]/g,'').trim(); const na=parseFloat(va),nb=parseFloat(vb); if(!isNaN(na)&&!isNaN(nb)) return asc?na-nb:nb-na; return asc?va.localeCompare(vb):vb.localeCompare(va); }}); rows.forEach(r=>tbody.appendChild(r)); }}
 // 恢复用户上次的 Tab 和时间范围
-(function() {
+(function() {{
   document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
-  const rangeMap = {today:0, week:1, month:2, all:3};
+  const rangeMap = {{today:0, week:1, month:2, all:3}};
   const btnIdx = rangeMap[currentRange];
   const rangeBtns = document.querySelectorAll('.time-btn');
   if (btnIdx != null && rangeBtns[btnIdx]) rangeBtns[btnIdx].classList.add('active');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  const tabMap = {turns:0, sessions:1, models:2, pricing:3};
-  const tabIdx = tabMap[currentTab] != null ? tabMap[currentTab] : 0;
+  const tabMap = {{turns:0, sessions:1, models:2, pricing:3, errors:4, efficiency:5, overspent:6}};
+  const tabIdx = tabMap[currentTab];
   const tabBtns = document.querySelectorAll('.tab-btn');
   if (tabIdx != null && tabBtns[tabIdx]) tabBtns[tabIdx].classList.add('active');
-  const tabEl = document.getElementById('tab-' + currentTab) || document.getElementById('tab-turns');
+  const tabEl = document.getElementById('tab-' + currentTab);
   if (tabEl) tabEl.classList.add('active');
-})();
+}})();
 
 renderAll();
 
 // JS 静默刷新：每 30 秒重新加载页面，状态通过 localStorage 保留
-setTimeout(function() { location.reload(); }, 30000);
+setTimeout(function() {{ location.reload(); }}, 30000);
 </script>
 </body></html>"""
     return html
@@ -1030,7 +1263,7 @@ def main():
     if os.path.isdir(joycode_dir):
         print(f"  JoyCode: {joycode_dir}")
 
-    sessions, turns, unmatched = collect_all(pricing_data)
+    sessions, turns, unmatched, errors, model_tools, session_tools = collect_all(pricing_data)
     print(f"采集完成: {len(sessions)} 个会话, {len(turns)} 次调用")
     if unmatched:
         print(f"未匹配价格的模型: {', '.join(unmatched)}")
@@ -1043,7 +1276,7 @@ def main():
         print(f"  {tool}: {count} 个会话")
 
     print("生成 HTML 看板...")
-    html = generate_html(sessions, turns, unmatched, pricing_data)
+    html = generate_html(sessions, turns, unmatched, pricing_data, errors, model_tools, session_tools)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"看板已生成: {args.output}")
