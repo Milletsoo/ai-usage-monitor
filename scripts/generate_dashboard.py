@@ -475,6 +475,256 @@ def merge_sub_agents(sessions, child_to_parent, parent_titles):
     return merged_sessions
 
 
+# ── v2.0: 错误数据采集 ────────────────────────────────
+def collect_errors():
+    """采集 Claude Code 的 API 错误 + Proma 的压缩失败"""
+    errors = []
+
+    # Claude Code api_error
+    cc_files = [f for f in glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "**/*.jsonl"), recursive=True)
+                if "subagents" not in f and "\\subagents\\" not in f]
+    for fpath in sorted(cc_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")[:8]
+        last_model = "unknown"
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "assistant":
+                    m = d.get("message", {}).get("model")
+                    if m:
+                        last_model = m
+                elif d.get("type") == "system" and d.get("subtype") == "api_error":
+                    err_msg = d.get("error", {}).get("message", "")
+                    ts_str = d.get("timestamp", "")
+                    try:
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        created_ms = int(dt.timestamp() * 1000)
+                        created_dt = dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        hour = dt.astimezone(TZ).hour
+                        date = dt.astimezone(TZ).strftime("%Y-%m-%d")
+                    except (ValueError, AttributeError):
+                        created_ms = 0
+                        created_dt = ""
+                        hour = 0
+                        date = ""
+                    # 分类
+                    if "429" in err_msg:
+                        err_type = "429 限流"
+                    elif "404" in err_msg:
+                        err_type = "404 模型不存在"
+                    elif any(x in err_msg for x in ["500", "502", "503"]):
+                        err_type = "5xx 服务器错误"
+                    elif "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                        err_type = "超时"
+                    elif "connection" in err_msg.lower():
+                        err_type = "连接错误"
+                    else:
+                        err_type = "其他"
+                    errors.append({
+                        "tool": "Claude Code", "session": sid, "model": last_model,
+                        "type": err_type, "message": err_msg[:200],
+                        "created_ms": created_ms, "created_dt": created_dt,
+                        "hour": hour, "date": date,
+                    })
+
+    # Proma compaction failures
+    proma_files = glob.glob(os.path.join(PROMA_SESSIONS_DIR, "*.jsonl"))
+    for fpath in sorted(proma_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")[:8]
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "system" and d.get("compact_result") == "failed":
+                    err_msg = d.get("compact_error", "")
+                    created_ms = d.get("_createdAt", 0)
+                    if created_ms:
+                        dt = datetime.fromtimestamp(created_ms / 1000, tz=TZ)
+                        created_dt = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        hour = dt.hour
+                        date = dt.strftime("%Y-%m-%d")
+                    else:
+                        created_dt = ""
+                        hour = 0
+                        date = ""
+                    if "429" in err_msg:
+                        err_type = "429 限流"
+                    elif "404" in err_msg:
+                        err_type = "404 模型不存在"
+                    else:
+                        err_type = "其他"
+                    errors.append({
+                        "tool": "Proma", "session": sid, "model": "(compaction)",
+                        "type": err_type, "message": err_msg[:200],
+                        "created_ms": created_ms, "created_dt": created_dt,
+                        "hour": hour, "date": date,
+                    })
+
+    return errors
+
+
+# ── v2.0: 工具使用统计 ────────────────────────────────
+def collect_tool_usage():
+    """统计各模型使用的工具类型分布"""
+    model_tools = defaultdict(lambda: defaultdict(int))
+    session_tools = defaultdict(lambda: {"tools": defaultdict(int), "tool_count": 0, "thinking_count": 0})
+
+    # Claude Code
+    cc_files = [f for f in glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "**/*.jsonl"), recursive=True)
+                if "subagents" not in f and "\\subagents\\" not in f]
+    for fpath in sorted(cc_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "assistant":
+                    msg = d.get("message", {})
+                    model = msg.get("model", "unknown")
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                ct = c.get("type", "")
+                                if ct == "tool_use":
+                                    tool_name = c.get("name", "unknown")
+                                    model_tools[model][tool_name] += 1
+                                    session_tools[sid]["tools"][tool_name] += 1
+                                    session_tools[sid]["tool_count"] += 1
+                                elif ct == "thinking":
+                                    session_tools[sid]["thinking_count"] += 1
+
+    # Proma
+    proma_files = glob.glob(os.path.join(PROMA_SESSIONS_DIR, "*.jsonl"))
+    for fpath in sorted(proma_files):
+        sid = os.path.basename(fpath).replace(".jsonl", "")
+        with open(fpath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "assistant":
+                    msg = d.get("message", {})
+                    model = msg.get("model", "unknown")
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                ct = c.get("type", "")
+                                if ct == "tool_use":
+                                    tool_name = c.get("name", "unknown")
+                                    model_tools[model][tool_name] += 1
+                                    session_tools[sid]["tools"][tool_name] += 1
+                                    session_tools[sid]["tool_count"] += 1
+                                elif ct == "thinking":
+                                    session_tools[sid]["thinking_count"] += 1
+
+    return model_tools, session_tools
+
+
+# ── v2.0: 性价比分析 + 超支归因 ───────────────────────
+def analyze_cost_efficiency(turns, pricing_data):
+    """分析模型性价比，生成建议（纯规则，不调 AI）"""
+    model_stats = defaultdict(lambda: {"total_cost": 0, "total_tokens": 0, "total_calls": 0, "total_input": 0, "total_output": 0, "total_duration": 0})
+    for t in turns:
+        m = t.get("matched_name", "unknown")
+        s = model_stats[m]
+        s["total_cost"] += t.get("cost_cny", 0)
+        s["total_tokens"] += t.get("input_tokens", 0) + t.get("output_tokens", 0) + t.get("cache_read_tokens", 0)
+        s["total_calls"] += 1
+        s["total_input"] += t.get("input_tokens", 0)
+        s["total_output"] += t.get("output_tokens", 0)
+        s["total_duration"] += t.get("duration_ms", 0)
+
+    results = []
+    for name, s in model_stats.items():
+        avg_cost = s["total_cost"] / s["total_calls"] if s["total_calls"] else 0
+        cost_per_1k = s["total_cost"] / (s["total_tokens"] / 1000) if s["total_tokens"] else 0
+        avg_duration = s["total_duration"] / s["total_calls"] if s["total_calls"] else 0
+        results.append({
+            "model": name, "calls": s["total_calls"], "total_cost": round(s["total_cost"], 2),
+            "total_tokens": s["total_tokens"], "avg_cost": round(avg_cost, 2),
+            "cost_per_1k": round(cost_per_1k, 4), "avg_duration_s": round(avg_duration / 1000, 1),
+        })
+    results.sort(key=lambda x: -x["avg_cost"])
+
+    # 生成建议
+    suggestions = []
+    if len(results) >= 2:
+        cheapest = results[-1]
+        most_expensive = results[0]
+        if most_expensive["avg_cost"] > 0 and cheapest["avg_cost"] > 0:
+            ratio = most_expensive["avg_cost"] / cheapest["avg_cost"]
+            if ratio > 2:
+                suggestions.append(f"💡 {most_expensive['model']} 单次均价 ¥{most_expensive['avg_cost']}，是 {cheapest['model']} 的 {ratio:.1f} 倍。简单问答任务建议用 {cheapest['model']}")
+    for r in results:
+        if r["avg_duration_s"] > 300:
+            suggestions.append(f"⏱️ {r['model']} 平均耗时 {r['avg_duration_s']}s/次，较长，可能适合复杂任务不适合简单问答")
+        if r["calls"] >= 3 and r["avg_cost"] > 5:
+            suggestions.append(f"💰 {r['model']} 已调用 {r['calls']} 次，均价 ¥{r['avg_cost']}，注意控制使用频率")
+
+    return results, suggestions
+
+
+def analyze_overspending(sessions, turns, session_tools, threshold=10.0):
+    """分析超支会话的费用归因（纯规则）"""
+    overspent = []
+    for s in sessions:
+        if s["total_cost_cny"] >= threshold:
+            sid = s["file_id"]
+            st = session_tools.get(sid, {"tools": {}, "tool_count": 0, "thinking_count": 0})
+            tools = st["tools"]
+            # 分类工具
+            file_ops = sum(v for k, v in tools.items() if k in ("Read", "Write", "Edit", "MultiEdit", "Bash", "PowerShell", "Glob", "LS", "Grep"))
+            web_ops = sum(v for k, v in tools.items() if k in ("WebSearch", "WebFetch", "BrowserNavigate", "BrowserObserve", "BrowserClick", "BrowserFill", "BrowserScreenshot", "BrowserExecuteJavaScript", "BrowserDomAction", "BrowserPress", "BrowserWaitFor"))
+            thinking = st["thinking_count"]
+            total_tools = st["tool_count"]
+            # 缓存占比
+            cache_ratio = s["total_cache_read"] / (s["total_input"] + s["total_cache_read"]) if (s["total_input"] + s["total_cache_read"]) else 0
+            # 建议
+            advice = []
+            if cache_ratio > 0.8:
+                advice.append(f"📋 缓存读取占比 {cache_ratio*100:.0f}%，上下文过大，建议压缩或拆分任务")
+            if web_ops > 5:
+                advice.append(f"🌐 联网操作 {web_ops} 次，消耗大，考虑使用本地知识库")
+            if file_ops > 20:
+                advice.append(f"📁 文件操作 {file_ops} 次，频繁读写，考虑脚本化批量处理")
+            if thinking > 10:
+                advice.append(f"🤖 AI 思考 {thinking} 次，任务复杂度高，考虑拆分为子任务")
+            if not advice:
+                advice.append("✅ 费用分布正常，无明显浪费")
+            overspent.append({
+                "session_name": s.get("title") or s["first_text"][:60] or sid[:8],
+                "session_id": sid, "cost": s["total_cost_cny"], "calls": s["turn_count"],
+                "models": ",".join(s["models_used"]), "date": s.get("date", ""),
+                "file_ops": file_ops, "web_ops": web_ops, "thinking": thinking,
+                "total_tools": total_tools, "cache_ratio": round(cache_ratio * 100),
+                "advice": advice,
+            })
+    overspent.sort(key=lambda x: -x["cost"])
+    return overspent
+
+
 # ── Prompt 合并 ──────────────────────────────────────
 def merge_turns_by_prompt(turns):
     """将同一会话内相同 prompt 的多次 API 调用合并为一条"""
@@ -565,7 +815,12 @@ def collect_all(pricing_data):
 
     all_sessions.sort(key=lambda x: x.get("first_created", 0), reverse=True)
     all_turns.sort(key=lambda x: x.get("created_ms", 0), reverse=True)
-    return all_sessions, all_turns, all_unmatched
+    
+    # v2.0: 采集错误数据和工具使用统计
+    errors = collect_errors()
+    model_tools, session_tools = collect_tool_usage()
+    
+    return all_sessions, all_turns, all_unmatched, errors, model_tools, session_tools
 
 
 def merge_sub_agents_turns(turns, child_to_parent, parent_titles):
@@ -666,7 +921,7 @@ def esc(text):
     return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def generate_html(sessions, turns, unmatched_models, pricing_data):
+def generate_html(sessions, turns, unmatched_models, pricing_data, errors, model_tools, session_tools):
     now = datetime.now(TZ)
     gen_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -729,7 +984,28 @@ def generate_html(sessions, turns, unmatched_models, pricing_data):
             "tier_threshold": m.get("tier_threshold"), "peak_hours": m.get("peak_hours"),
         })
 
-    all_data = json.dumps({"turns": turns_js, "sessions": sessions_js, "pricing": pricing_js}, ensure_ascii=False)
+    # v2.0 数据
+    errors_js = [{
+        "tool": e.get("tool", ""), "session": e.get("session", ""),
+        "model": e.get("model", ""), "type": e.get("type", ""),
+        "message": e.get("message", ""), "dt": e.get("created_dt", ""),
+        "hour": e.get("hour", 0), "date": e.get("date", ""), "ts": e.get("created_ms", 0),
+    } for e in errors]
+    
+    model_tools_js = {m: dict(tools) for m, tools in model_tools.items()}
+    
+    cost_eff, sugg = analyze_cost_efficiency(turns, pricing_data)
+    cost_eff_js = cost_eff
+    
+    overspent = analyze_overspending(sessions, turns, session_tools, 10.0)
+    overspent_js = overspent
+    
+    all_data = json.dumps({
+        "turns": turns_js, "sessions": sessions_js, "pricing": pricing_js,
+        "errors": errors_js, "model_tools": model_tools_js,
+        "cost_efficiency": cost_eff_js, "suggestions": sugg,
+        "overspent": overspent_js,
+    }, ensure_ascii=False)
 
     total_sessions = len(sessions)
     total_turns = len(turns)
@@ -825,6 +1101,9 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
   <button class="tab-btn" onclick="switchTab('sessions',this)">按会话统计</button>
   <button class="tab-btn" onclick="switchTab('models',this)">按模型统计</button>
   <button class="tab-btn" onclick="switchTab('pricing',this)">模型价格表</button>
+  <button class="tab-btn" onclick="switchTab('errors',this)">🚨 调用稳定性</button>
+  <button class="tab-btn" onclick="switchTab('efficiency',this)">💡 性价比分析</button>
+  <button class="tab-btn" onclick="switchTab('overspent',this)">⚠️ 超支风险</button>
 </div>
 
 <!-- 每次任务 -->
@@ -870,6 +1149,54 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
     <th>模型</th><th>可商用</th><th>任务场景</th><th>计价方式</th><th>输入</th><th>缓存读取</th><th>输出</th>
   </tr></thead><tbody id="pricing-tbody"></tbody></table></div></div>
   <div style="font-size:12px;color:var(--text-dim);padding:12px 0;">💡 分层计价按每轮输入上下文长度判定；峰谷计价按调用时间(8-22点高峰)判定。分层/峰谷显示为 低/高 或 谷/峰。</div>
+</div>
+
+<!-- v2.0: 调用稳定性 -->
+<div class="tab-content" id="tab-errors">
+  <div class="table-container"><div class="table-header"><h3>🚨 调用稳定性监控</h3><span id="errors-summary" class="text-dim"></span></div>
+  <div class="table-wrap"><table><thead><tr>
+    <th onclick="sortTable('errors-tbody',0)">模型</th>
+    <th onclick="sortTable('errors-tbody',1)" class="num">错误次数</th>
+    <th onclick="sortTable('errors-tbody',2)" class="num">主要类型</th>
+    <th onclick="sortTable('errors-tbody',3)" class="num">占比</th>
+  </tr></thead><tbody id="errors-tbody"></tbody></table></div></div>
+  <div class="chart-container"><h3>⏰ 24小时错误分布</h3><div class="bar-chart" id="error-hour-chart" style="justify-content:center;"></div><div class="chart-labels" id="error-hour-labels" style="justify-content:center;"></div></div>
+  <div class="table-container"><div class="table-header"><h3>📋 错误明细 (最近 100 条)</h3></div>
+  <div class="table-wrap"><table><thead><tr>
+    <th>时间</th><th>工具</th><th>模型</th><th>错误类型</th><th>错误信息</th>
+  </tr></thead><tbody id="error-detail-tbody"></tbody></table></div></div>
+</div>
+
+<!-- v2.0: 性价比分析 -->
+<div class="tab-content" id="tab-efficiency">
+  <div id="efficiency-suggestions" style="margin-bottom:16px;"></div>
+  <div class="table-container"><div class="table-header"><h3>💡 模型性价比对比</h3></div>
+  <div class="table-wrap"><table><thead><tr>
+    <th onclick="sortTable('eff-tbody',0)">模型</th>
+    <th onclick="sortTable('eff-tbody',1)" class="num">调用次数</th>
+    <th onclick="sortTable('eff-tbody',2)" class="num">总费用(¥)</th>
+    <th onclick="sortTable('eff-tbody',3)" class="num">单次均价(¥)</th>
+    <th onclick="sortTable('eff-tbody',4)" class="num">每千Token(¥)</th>
+    <th onclick="sortTable('eff-tbody',5)" class="num">平均耗时(s)</th>
+    <th onclick="sortTable('eff-tbody',6)">建议</th>
+  </tr></thead><tbody id="eff-tbody"></tbody></table></div></div>
+</div>
+
+<!-- v2.0: 超支风险 -->
+<div class="tab-content" id="tab-overspent">
+  <div class="table-container"><div class="table-header"><h3>⚠️ 超支会话分析 (阈值 ¥10)</h3></div>
+  <div class="table-wrap"><table><thead><tr>
+    <th onclick="sortTable('over-tbody',0)">日期</th>
+    <th onclick="sortTable('over-tbody',1)">会话名称</th>
+    <th onclick="sortTable('over-tbody',2)">模型</th>
+    <th onclick="sortTable('over-tbody',3)" class="num">费用(¥)</th>
+    <th onclick="sortTable('over-tbody',4)" class="num">调用次数</th>
+    <th onclick="sortTable('over-tbody',5)" class="num">文件操作</th>
+    <th onclick="sortTable('over-tbody',6)" class="num">联网操作</th>
+    <th onclick="sortTable('over-tbody',7)" class="num">AI思考</th>
+    <th onclick="sortTable('over-tbody',8)" class="num">缓存占比%</th>
+    <th>建议</th>
+  </tr></thead><tbody id="over-tbody"></tbody></table></div></div>
 </div>
 
 <script>
@@ -979,7 +1306,50 @@ function renderPricing() {{
   }}).join('');
 }}
 
-function renderAll() {{ renderOverview(); renderChart(); renderTurns(); renderSessions(); renderModels(); renderPricing(); }}
+// ── v2.0: 调用稳定性 ──
+function renderErrors() {{
+  const errors = ALL_DATA.errors || [];
+  const total = errors.length;
+  document.getElementById('errors-summary').textContent = total > 0 ? `共 ${{total}} 次错误` : '';
+  // 按模型统计
+  const byModel = {{}};
+  errors.forEach(e => {{ if(!byModel[e.model]) byModel[e.model] = {{count:0, types:{{}}}}; byModel[e.model].count++; byModel[e.model].types[e.type]=(byModel[e.model].types[e.type]||0)+1; }});
+  const arr = Object.entries(byModel).map(([m,v])=>({{model:m,count:v.count,mainType:Object.entries(v.types).sort((a,b)=>b[1]-a[1])[0][0],pct:Math.round(v.count/total*100)}})).sort((a,b)=>b.count-a.count);
+  document.getElementById('errors-tbody').innerHTML = arr.map(e=>`<tr><td><strong>${{esc(e.model)}}</strong></td><td class="num text-red">${{e.count}}</td><td>${{esc(e.mainType)}}</td><td class="num">${{e.pct}}%</td></tr>`).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--text-dim);padding:30px;">暂无错误记录</td></tr>';
+  // 24h 分布
+  const byHour = Array(24).fill(0);
+  errors.forEach(e=>{{ if(e.hour>=0&&e.hour<24) byHour[e.hour]++; }});
+  const maxH = Math.max(...byHour) || 1;
+  const colors=['var(--accent)','var(--orange)','var(--red)','var(--purple)'];
+  document.getElementById('error-hour-chart').innerHTML = byHour.map((v,h)=>v>0?`<div class="bar" style="height:${{(v/maxH)*100}}%;background:var(--red);"><span class="bar-label" style="color:var(--red);font-size:9px;">${{v}}</span><div class="bar-tooltip">${{h}}:00 - ${{h+1}}:00<br>${{v}} 次错误</div></div>`:`<div class="bar" style="height:2%;background:var(--card-border);opacity:0.3;"></div>`).join('');
+  document.getElementById('error-hour-labels').innerHTML = byHour.map((v,h)=>h%2===0?`<div class="chart-label">${{String(h).padStart(2,'0')}}</div>`:`<div class="chart-label"></div>`).join('');
+  // 明细 (最近100条)
+  const recent = errors.slice(-100).reverse();
+  document.getElementById('error-detail-tbody').innerHTML = recent.map(e=>`<tr><td class="text-dim" style="white-space:nowrap;">${{e.dt}}</td><td>${{toolBadge(e.tool)}}</td><td>${{esc(e.model)}}</td><td><span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red);">${{esc(e.type)}}</span></td><td class="text-dim" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${{esc(e.message)}}">${{esc(e.message)}}</td></tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:30px;">暂无错误记录</td></tr>';
+}}
+
+// ── v2.0: 性价比分析 ──
+function renderEfficiency() {{
+  const eff = ALL_DATA.cost_efficiency || [];
+  const sugg = ALL_DATA.suggestions || [];
+  document.getElementById('efficiency-suggestions').innerHTML = sugg.map(s=>`<div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:13px;">${{s}}</div>`).join('') || '<div style="color:var(--text-dim);font-size:13px;">暂无建议</div>';
+  document.getElementById('eff-tbody').innerHTML = eff.map(e=>{{
+    let advice='';
+    if(e.avg_cost>5) advice='<span style="color:var(--red);">贵</span>'; else if(e.avg_cost>1) advice='<span style="color:var(--orange);">中</span>'; else advice='<span style="color:var(--green);">便宜</span>';
+    return `<tr><td><strong>${{esc(e.model)}}</strong></td><td class="num">${{e.calls}}</td><td class="num text-green">¥${{e.total_cost.toFixed(2)}}</td><td class="num">¥${{e.avg_cost.toFixed(2)}}</td><td class="num">¥${{e.cost_per_1k.toFixed(4)}}</td><td class="num">${{e.avg_duration_s.toFixed(1)}}</td><td>${{advice}}</td></tr>`;
+  }}).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text-dim);padding:30px;">暂无数据</td></tr>';
+}}
+
+// ── v2.0: 超支风险 ──
+function renderOverspent() {{
+  const overs = ALL_DATA.overspent || [];
+  document.getElementById('over-tbody').innerHTML = overs.map(o=>{{
+    const advice = o.advice.join('<br>');
+    return `<tr><td class="text-dim">${{o.date}}</td><td class="session-cell">${{esc(o.session_name)}}</td><td class="text-dim">${{esc(o.models)}}</td><td class="num text-red">¥${{o.cost.toFixed(2)}}</td><td class="num">${{o.calls}}</td><td class="num">${{o.file_ops}}</td><td class="num">${{o.web_ops}}</td><td class="num">${{o.thinking}}</td><td class="num">${{o.cache_ratio}}%</td><td style="font-size:12px;color:var(--text-dim);max-width:300px;">${{advice}}</td></tr>`;
+  }}).join('') || '<tr><td colspan="10" style="text-align:center;color:var(--text-dim);padding:30px;">暂无超支会话 (阈值 ¥10)</td></tr>';
+}}
+
+function renderAll() {{ renderOverview(); renderChart(); renderTurns(); renderSessions(); renderModels(); renderPricing(); renderErrors(); renderEfficiency(); renderOverspent(); }}
 function switchTab(tabId, btn) {{ document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active')); btn.classList.add('active'); document.getElementById('tab-'+tabId).classList.add('active'); }}
 function filterTable(tbodyId, query) {{ const tbody=document.getElementById(tbodyId); const q=query.toLowerCase(); tbody.querySelectorAll('tr').forEach(tr=>{{ tr.style.display=tr.textContent.toLowerCase().includes(q)?'':'none'; }}); }}
 let sortStates={{}};
@@ -1008,7 +1378,7 @@ def main():
     if os.path.isdir(joycode_dir):
         print(f"  JoyCode: {joycode_dir}")
 
-    sessions, turns, unmatched = collect_all(pricing_data)
+    sessions, turns, unmatched, errors, model_tools, session_tools = collect_all(pricing_data)
     print(f"采集完成: {len(sessions)} 个会话, {len(turns)} 次调用")
     if unmatched:
         print(f"未匹配价格的模型: {', '.join(unmatched)}")
@@ -1021,7 +1391,11 @@ def main():
         print(f"  {tool}: {count} 个会话")
 
     print("生成 HTML 看板...")
-    html = generate_html(sessions, turns, unmatched, pricing_data)
+    # v2.0: 分析
+    cost_efficiency, suggestions = analyze_cost_efficiency(turns, pricing_data)
+    overspent = analyze_overspending(sessions, turns, session_tools, threshold=10.0)
+    
+    html = generate_html(sessions, turns, unmatched, pricing_data, errors, model_tools, session_tools)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"看板已生成: {args.output}")
