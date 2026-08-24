@@ -65,6 +65,11 @@ def generate_dashboard():
         )
         if result.returncode == 0:
             now = datetime.now(TZ).strftime("%H:%M:%S")
+            # 同步到 workspace-files 供浏览器预览
+            import shutil
+            ws_copy = os.path.join(HOME, ".proma", "agent-workspaces", "ai", "workspace-files", "usage-dashboard.html")
+            if os.path.exists(OUTPUT_HTML):
+                shutil.copy2(OUTPUT_HTML, ws_copy)
             # 提取关键信息
             for line in result.stdout.split("\n"):
                 if "采集完成" in line:
