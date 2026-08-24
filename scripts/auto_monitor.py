@@ -16,17 +16,24 @@ import glob
 import subprocess
 from datetime import datetime, timezone, timedelta
 
-if sys.platform == "win32":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-
+# 常量定义（必须在输出重定向之前）
 TZ = timezone(timedelta(hours=8))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(SCRIPT_DIR)
 HOME = os.path.expanduser("~")
 GENERATE_SCRIPT = os.path.join(SCRIPT_DIR, "generate_dashboard.py")
 OUTPUT_HTML = os.path.join(SKILL_DIR, "dashboard.html")
+
+if sys.platform == "win32":
+    # pythonw 无控制台时重定向到日志文件
+    if sys.executable.endswith("pythonw.exe") or sys.executable.endswith("pythonw"):
+        log_path = os.path.join(SKILL_DIR, "monitor.log")
+        sys.stdout = open(log_path, "a", encoding="utf-8")
+        sys.stderr = sys.stdout
+    else:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # 监控路径
 WATCH_PATHS = [
@@ -123,24 +130,34 @@ def main():
     try:
         while True:
             time.sleep(args.interval)
-            current_sigs = get_file_signatures()
+            try:
+                current_sigs = get_file_signatures()
 
-            # 检测变化：新增文件 或 文件被修改
-            changed = False
-            for f, mtime in current_sigs.items():
-                if f not in last_sigs:
-                    changed = True  # 新文件
-                    break
-                if mtime > last_sigs[f]:
-                    changed = True  # 文件被修改
-                    break
+                changed = False
+                for f, mtime in current_sigs.items():
+                    if f not in last_sigs:
+                        changed = True
+                        break
+                    if mtime > last_sigs[f]:
+                        changed = True
+                        break
 
-            if changed:
-                generate_dashboard()
-                last_sigs = current_sigs
+                if changed:
+                    generate_dashboard()
+                    last_sigs = current_sigs
+            except Exception as e:
+                # 单次检查出错不影响整个监控
+                pass
 
     except KeyboardInterrupt:
         print("\n\n监控已停止。")
+    except Exception as e:
+        # 崩溃后自动重启
+        print(f"\n⚠️ 监控异常: {e}")
+        print("3秒后自动重启...")
+        time.sleep(3)
+        import subprocess
+        subprocess.Popen([sys.executable, __file__], creationflags=0x00000008)
 
 
 if __name__ == "__main__":

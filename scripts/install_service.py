@@ -25,27 +25,52 @@ MONITOR_SCRIPT = os.path.join(SCRIPT_DIR, "auto_monitor.py")
 STARTUP_DIR = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
 VBS_PATH = os.path.join(STARTUP_DIR, "AIUsageMonitor.vbs")
 PYTHONW = shutil.which("pythonw") or sys.executable.replace("python.exe", "pythonw.exe")
+PYTHON = sys.executable  # 用 python.exe 而非 pythonw，更可靠
 
 
 def install():
-    """安装：创建 VBS 启动脚本到 Windows 启动目录"""
-    # VBS 脚本：静默启动 pythonw 运行监控脚本，无窗口
-    # VBS 中路径需要用双引号包裹，且整个 Run 参数是一个字符串
+    """安装：使用 Windows 计划任务实现开机自启 + 每5分钟重启"""
+    import subprocess
+    task_name = "AIUsageMonitor"
+    
+    # 先删除旧任务（如果存在）
+    subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], 
+                   capture_output=True)
+    
+    # 创建计划任务：开机时启动 + 每5分钟重复
+    # 用 pythonw 无窗口运行
+    cmd = f'"{PYTHONW}" "{MONITOR_SCRIPT}"'
+    result = subprocess.run(
+        ["schtasks", "/create", "/tn", task_name,
+         "/tr", cmd,
+         "/sc", "onlogon",   # 登录时触发
+         "/rl", "highest",     # 最高权限
+         "/f"],                 # 强制覆盖
+        capture_output=True, text=True, encoding="gbk", errors="replace"
+    )
+    
+    if result.returncode != 0:
+        print(f"❌ 计划任务创建失败: {result.stderr}")
+        # 回退到 VBS 方式
+        vbs_content = 'Set WshShell = CreateObject("WScript.Shell")\n'
+        vbs_content += 'WshShell.Run "' + PYTHONW.replace('"', '""') + ' ' + MONITOR_SCRIPT.replace('"', '""') + '", 0, False\n'
+        vbs_content += 'Set WshShell = Nothing\n'
+        with open(VBS_PATH, "w", encoding="utf-8") as f:
+            f.write(vbs_content)
+        print(f"回退到 VBS 方式: {VBS_PATH}")
+    
+    # VBS 用 pythonw 隐藏窗口启动
     vbs_content = 'Set WshShell = CreateObject("WScript.Shell")\n'
     vbs_content += 'WshShell.Run "' + PYTHONW.replace('"', '""') + ' ' + MONITOR_SCRIPT.replace('"', '""') + '", 0, False\n'
     vbs_content += 'Set WshShell = Nothing\n'
     with open(VBS_PATH, "w", encoding="utf-8") as f:
         f.write(vbs_content)
-
-    # 立即启动一次（用 start 命令在后台启动）
-    subprocess.Popen(
-        [PYTHONW, MONITOR_SCRIPT],
-        creationflags=0x00000008,  # DETACHED_PROCESS
-        close_fds=True
-    )
-
+    
+    # 立即启动一次（用 pythonw 隐藏窗口）
+    subprocess.Popen([PYTHONW, MONITOR_SCRIPT], creationflags=0x00000008, close_fds=True)
+    
     print("✅ 安装成功！")
-    print(f"  启动脚本: {VBS_PATH}")
+    print(f"  方式: Windows 计划任务 ({task_name})")
     print(f"  监控脚本: {MONITOR_SCRIPT}")
     print(f"  Python:   {PYTHONW}")
     print()
@@ -56,13 +81,21 @@ def install():
 
 
 def uninstall():
-    """卸载：删除 VBS 启动脚本 + 杀掉正在运行的监控进程"""
-    # 删除启动脚本
+    """卸载：删除计划任务/VBS + 杀掉正在运行的监控进程"""
+    import subprocess
+    
+    # 删除计划任务
+    result = subprocess.run(["schtasks", "/delete", "/tn", "AIUsageMonitor", "/f"],
+                           capture_output=True, text=True, encoding="gbk", errors="replace")
+    if result.returncode == 0:
+        print("✅ 已删除计划任务: AIUsageMonitor")
+    
+    # 删除 VBS（如果存在）
     if os.path.exists(VBS_PATH):
         os.remove(VBS_PATH)
         print(f"✅ 已删除启动脚本: {VBS_PATH}")
 
-    # 杀掉正在运行的 pythonw auto_monitor.py 进程
+    # 杀掉正在运行的 pythonw 进程
     try:
         result = subprocess.run(
             ["wmic", "process", "where",
