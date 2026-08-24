@@ -30,10 +30,10 @@ PYTHONW = shutil.which("pythonw") or sys.executable.replace("python.exe", "pytho
 def install():
     """安装：创建 VBS 启动脚本到 Windows 启动目录"""
     # VBS 脚本：静默启动 pythonw 运行监控脚本，无窗口
-    vbs_content = f"""Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """ + chr(34) + PYTHONW + chr(34) + " " + chr(34) + MONITOR_SCRIPT + chr(34) + """ 0, False
-Set WshShell = Nothing
-"""
+    # VBS 中路径需要用双引号包裹，且整个 Run 参数是一个字符串
+    vbs_content = 'Set WshShell = CreateObject("WScript.Shell")\n'
+    vbs_content += 'WshShell.Run "' + PYTHONW.replace('"', '""') + ' ' + MONITOR_SCRIPT.replace('"', '""') + '", 0, False\n'
+    vbs_content += 'Set WshShell = Nothing\n'
     with open(VBS_PATH, "w", encoding="utf-8") as f:
         f.write(vbs_content)
 
