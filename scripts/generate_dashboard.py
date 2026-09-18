@@ -487,17 +487,14 @@ def collect_cc_switch(exact, aliases):
         if (inp or 0) == 0 and (outp or 0) == 0 and (cr or 0) == 0:
             continue
         
+        # CC Switch 自带 USD 费用，直接用（比刊例价更准确，含折扣等）
+        cost_cny = float(total_usd or 0) * 7.2
+        
+        # 模型名：优先用 pricing_model，匹配价格表获取 display_name
         model_key = pricing_model or model or req_model or 'unknown'
         mp = match_model(model_key, exact, aliases)
-        if mp:
-            cost_cny = calculate_turn_cost(mp, {
-                'input_tokens': inp or 0, 'output_tokens': outp or 0,
-                'cache_read_input_tokens': cr or 0, 'cache_creation_input_tokens': cc or 0,
-            }, created_at * 1000)
-            matched_name = mp.get('display_name', model_key)
-        else:
-            cost_cny = float(total_usd or 0) * 7.2
-            matched_name = model_key
+        matched_name = mp.get('display_name', model_key) if mp else model_key
+        if not mp:
             unmatched.add(model_key)
         
         tool_map = {'claude': 'Claude Code', 'codex': 'Codex', 'gemini': 'Gemini'}
