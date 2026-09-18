@@ -428,7 +428,7 @@ CC_SWITCH_DB = os.path.join(HOME, ".cc-switch", "cc-switch.db")
 
 
 def collect_cc_switch(exact, aliases):
-    """从 CC Switch 数据库采集代理请求日志"""
+    """从 CC Switch 数据库采集代理请求日志，合并 Codex prompt 并按时间窗口聚合"""
     if not os.path.isfile(CC_SWITCH_DB):
         return [], [], set()
     
@@ -436,11 +436,36 @@ def collect_cc_switch(exact, aliases):
     conn = sqlite3.connect(CC_SWITCH_DB)
     cursor = conn.cursor()
     
+    # 加载 Codex thread_history 中的 prompt 文本
+    codex_prompts = {}  # {timestamp_ms: prompt_text}
+    codex_db = os.path.join(HOME, ".codex", "thread_history_1.sqlite")
+    if os.path.isfile(codex_db):
+        try:
+            cconn = sqlite3.connect(codex_db)
+            ccursor = cconn.cursor()
+            ccursor.execute('''SELECT t.started_at, i.item_json FROM thread_turns t
+                JOIN thread_items i ON t.turn_id = i.turn_id AND i.item_type='userMessage'
+                ORDER BY t.started_at''')
+            for row in ccursor.fetchall():
+                started_at = row[0]
+                try:
+                    item = json.loads(row[1])
+                    content = item.get('content', [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict) and c.get('type') == 'text':
+                                codex_prompts[started_at * 1000] = c.get('text', '')[:200]
+                                break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            cconn.close()
+        except Exception:
+            pass
+    
     sessions = []
     all_turns = []
     unmatched = set()
     
-    # 查询所有成功的代理请求（status_code=200），排除重复的 codex_session 数据源
     cursor.execute('''
         SELECT request_id, provider_id, app_type, model, request_model, pricing_model,
                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -449,101 +474,121 @@ def collect_cc_switch(exact, aliases):
                cost_multiplier, created_at, data_source
         FROM proxy_request_logs 
         WHERE data_source = 'proxy' AND status_code = 200
-        ORDER BY created_at DESC
+        ORDER BY created_at ASC
     ''')
     
-    # 按会话分组
-    session_turns = {}
-    
+    raw_turns = []
     for row in cursor.fetchall():
         (req_id, provider_id, app_type, model, req_model, pricing_model,
          inp, outp, cr, cc, in_cost, out_cost, cr_cost, cc_cost,
          total_usd, latency, status, err_msg, session_id,
          cost_mult, created_at, data_source) = row
         
-        # 跳过 0 token 的请求
         if (inp or 0) == 0 and (outp or 0) == 0 and (cr or 0) == 0:
             continue
         
-        # 确定模型名
         model_key = pricing_model or model or req_model or 'unknown'
         mp = match_model(model_key, exact, aliases)
         if mp:
             cost_cny = calculate_turn_cost(mp, {
-                'input_tokens': inp or 0,
-                'output_tokens': outp or 0,
-                'cache_read_input_tokens': cr or 0,
-                'cache_creation_input_tokens': cc or 0,
+                'input_tokens': inp or 0, 'output_tokens': outp or 0,
+                'cache_read_input_tokens': cr or 0, 'cache_creation_input_tokens': cc or 0,
             }, created_at * 1000)
             matched_name = mp.get('display_name', model_key)
         else:
-            # 用 CC Switch 自带的 USD 费用换算 (×7.2 汇率)
             cost_cny = float(total_usd or 0) * 7.2
             matched_name = model_key
             unmatched.add(model_key)
         
-        # 确定工具名
         tool_map = {'claude': 'Claude Code', 'codex': 'Codex', 'gemini': 'Gemini'}
         tool_name = tool_map.get(app_type, app_type or 'CC Switch')
-        
-        # 会话标识
         sid = session_id or req_id[:8]
-        
         dt = datetime.fromtimestamp(created_at, tz=TZ) if created_at else None
-        created_ms = created_at * 1000 if created_at else 0
         
-        turn = {
-            'tool': tool_name,
-            'session_file_id': sid,
-            'model_id': model_key,
+        # 从 Codex thread_history 按时间最近匹配 prompt
+        prompt_text = ''
+        if codex_prompts and created_at:
+            req_ts_ms = created_at * 1000
+            best_ts = None
+            best_diff = 30000  # 30秒内
+            for pt_ts, pt_text in codex_prompts.items():
+                diff = abs(pt_ts - req_ts_ms)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_ts = pt_ts
+            if best_ts:
+                prompt_text = codex_prompts[best_ts]
+        
+        raw_turns.append({
+            'tool': tool_name, 'session_file_id': sid, 'model_id': model_key,
             'matched_name': matched_name,
-            'input_tokens': inp or 0,
-            'output_tokens': outp or 0,
-            'cache_read_tokens': cr or 0,
-            'cache_create_tokens': cc or 0,
-            'cost_cny': cost_cny,
-            'created_ms': created_ms,
+            'input_tokens': inp or 0, 'output_tokens': outp or 0,
+            'cache_read_tokens': cr or 0, 'cache_create_tokens': cc or 0,
+            'cost_cny': cost_cny, 'created_ms': created_at * 1000 if created_at else 0,
             'created_dt': dt.strftime('%Y-%m-%d %H:%M:%S') if dt else '',
-            'duration_ms': latency or 0,
-            'skills': [],
-            'prompt_text': '',
-            'session_title': f'{tool_name} - {model_key}',
-            'session_first_text': '',
+            'duration_ms': latency or 0, 'skills': [],
+            'prompt_text': prompt_text,
+            'session_title': prompt_text[:60] if prompt_text else f'{tool_name} - {model_key}',
+            'session_first_text': prompt_text,
             '_is_sub_agent': False,
-        }
-        
-        all_turns.append(turn)
-        
-        if sid not in session_turns:
-            session_turns[sid] = []
-        session_turns[sid].append(turn)
+        })
+    
+    conn.close()
+    
+    # 按时间窗口合并: 同一工具 + 同会话 + 120秒内 = 一次任务
+    merged = []
+    for t in raw_turns:
+        if merged:
+            prev = merged[-1]
+            same_session = prev['session_file_id'] == t['session_file_id']
+            same_tool = prev['tool'] == t['tool']
+            time_gap = t['created_ms'] - prev['created_ms'] if t['created_ms'] and prev['created_ms'] else 999999
+            if same_tool and time_gap < 120000:  # 同工具 + 120秒内 = 一次任务
+                # 合并到上一条
+                prev['input_tokens'] += t['input_tokens']
+                prev['output_tokens'] += t['output_tokens']
+                prev['cache_read_tokens'] += t['cache_read_tokens']
+                prev['cache_create_tokens'] += t['cache_create_tokens']
+                prev['cost_cny'] = round(prev['cost_cny'] + t['cost_cny'], 6)
+                prev['duration_ms'] += t['duration_ms']
+                prev.setdefault('api_calls', 1)
+                prev['api_calls'] += 1
+                continue
+        merged.append(dict(t))
+    for m in merged:
+        m.setdefault('api_calls', 1)
+        m['cost_cny'] = round(m['cost_cny'], 6)
     
     # 构建会话
+    session_turns = {}
+    for t in merged:
+        sid = t['session_file_id']
+        if sid not in session_turns:
+            session_turns[sid] = []
+        session_turns[sid].append(t)
+    
     for sid, sturns in session_turns.items():
         times = [t['created_ms'] for t in sturns if t['created_ms']]
         first_ms = min(times) if times else 0
         last_ms = max(times) if times else 0
+        title = sturns[0].get('prompt_text', '')[:60] if sturns[0].get('prompt_text') else f"{sturns[0]['tool']} - {','.join(sorted(set(t['matched_name'] for t in sturns)))}"
         s = {
-            'file_id': sid,
-            'tool': sturns[0]['tool'],
-            'turns': sturns,
+            'file_id': sid, 'tool': sturns[0]['tool'], 'turns': sturns,
             'total_input': sum(t['input_tokens'] for t in sturns),
             'total_output': sum(t['output_tokens'] for t in sturns),
             'total_cache_read': sum(t['cache_read_tokens'] for t in sturns),
             'total_cache_create': sum(t['cache_create_tokens'] for t in sturns),
             'total_cost_cny': round(sum(t['cost_cny'] for t in sturns), 4),
             'models_used': sorted(set(t['matched_name'] for t in sturns)),
-            'skills_used': [],
-            'first_text': sturns[0].get('session_title', ''),
-            'first_created': first_ms,
-            'last_created': last_ms,
-            'title': f"{sturns[0]['tool']} - {','.join(sorted(set(t['matched_name'] for t in sturns)))}",
+            'skills_used': [], 'first_text': sturns[0].get('prompt_text', ''),
+            'first_created': first_ms, 'last_created': last_ms,
+            'title': title,
             'date': datetime.fromtimestamp(first_ms / 1000, tz=TZ).strftime('%Y-%m-%d') if first_ms else None,
         }
         _finalize_session(s)
         sessions.append(s)
     
-    conn.close()
+    all_turns = merged
     return sessions, all_turns, unmatched
 
 

@@ -418,8 +418,8 @@
       "high_tier": { "input": 2.8, "cache_read": 0.28, "cache_create": 3.5, "output": 12.6 }
     },
     {
-      "id": "GPT-5.5",
-      "display_name": "GPT-5.5 (updated)",
+      "id": "gpt-5.5-2026-04-24",
+      "display_name": "GPT-5.5",
       "new_this_week": false,
       "open_source": false,
       "commercial": false,
@@ -430,6 +430,76 @@
       "tier_threshold": 272000,
       "low_tier": { "input": 35.0, "cache_read": 3.5, "output": 210.0 },
       "high_tier": { "input": 70.0, "cache_read": 7.0, "output": 315.0 }
+    },
+    {
+      "id": "gpt-5.4-2026-03-05",
+      "display_name": "GPT-5.4",
+      "new_this_week": false,
+      "open_source": false,
+      "commercial": false,
+      "category": "大语言模型",
+      "tasks": "文本生成,图片理解",
+      "api_available": true,
+      "pricing_type": "tiered",
+      "tier_threshold": 272000,
+      "low_tier": { "input": 17.5, "cache_read": 1.75, "output": 105.0 },
+      "high_tier": { "input": 35.0, "cache_read": 3.5, "output": 157.5 }
+    },
+    {
+      "id": "gpt-5-2025-08-07",
+      "display_name": "GPT-5",
+      "new_this_week": false,
+      "open_source": false,
+      "commercial": false,
+      "category": "多模态",
+      "tasks": "图片理解,视频理解",
+      "api_available": true,
+      "pricing_type": "flat",
+      "input": 9.375,
+      "cache_read": null,
+      "output": 75.0
+    },
+    {
+      "id": "glm-5.2-ali",
+      "display_name": "GLM-5.2 (ALI)",
+      "new_this_week": false,
+      "open_source": true,
+      "commercial": true,
+      "category": "大语言模型",
+      "tasks": "文本生成",
+      "api_available": true,
+      "pricing_type": "flat",
+      "input": 8.0,
+      "cache_read": 2.0,
+      "output": 28.0
+    },
+    {
+      "id": "jd/GLM-5.3-Flash",
+      "display_name": "GLM-5.3 Flash",
+      "new_this_week": true,
+      "open_source": true,
+      "commercial": true,
+      "category": "大语言模型",
+      "tasks": "文本生成",
+      "api_available": true,
+      "pricing_type": "flat",
+      "input": 4.0,
+      "cache_read": 1.0,
+      "output": 14.0
+    },
+    {
+      "id": "codex-auto-review",
+      "display_name": "Codex Auto Review",
+      "new_this_week": false,
+      "open_source": false,
+      "commercial": false,
+      "category": "其他",
+      "tasks": "代码审查",
+      "api_available": false,
+      "pricing_type": "flat",
+      "input": 0,
+      "cache_read": 0,
+      "output": 0
     }
   ]
 }
