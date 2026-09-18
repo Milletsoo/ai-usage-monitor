@@ -509,13 +509,12 @@ def collect_cc_switch(exact, aliases):
         prompt_text = ''
         if codex_prompts and created_at:
             req_ts_ms = created_at * 1000
+            # 找时间 <= 请求时间 的最近一条 prompt（不限间隔）
             best_ts = None
-            best_diff = 30000  # 30秒内
-            for pt_ts, pt_text in codex_prompts.items():
-                diff = abs(pt_ts - req_ts_ms)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_ts = pt_ts
+            for pt_ts in codex_prompts:
+                if pt_ts <= req_ts_ms:
+                    if best_ts is None or pt_ts > best_ts:
+                        best_ts = pt_ts
             if best_ts:
                 prompt_text = codex_prompts[best_ts]
         
