@@ -423,6 +423,130 @@ def collect_joycode(exact, aliases):
     return sessions, all_turns, unmatched
 
 
+# ── CC Switch 数据采集 ───────────────────────────────
+CC_SWITCH_DB = os.path.join(HOME, ".cc-switch", "cc-switch.db")
+
+
+def collect_cc_switch(exact, aliases):
+    """从 CC Switch 数据库采集代理请求日志"""
+    if not os.path.isfile(CC_SWITCH_DB):
+        return [], [], set()
+    
+    import sqlite3
+    conn = sqlite3.connect(CC_SWITCH_DB)
+    cursor = conn.cursor()
+    
+    sessions = []
+    all_turns = []
+    unmatched = set()
+    
+    # 查询所有成功的代理请求（status_code=200），排除重复的 codex_session 数据源
+    cursor.execute('''
+        SELECT request_id, provider_id, app_type, model, request_model, pricing_model,
+               input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+               input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd,
+               total_cost_usd, latency_ms, status_code, error_message, session_id,
+               cost_multiplier, created_at, data_source
+        FROM proxy_request_logs 
+        WHERE data_source = 'proxy' AND status_code = 200
+        ORDER BY created_at DESC
+    ''')
+    
+    # 按会话分组
+    session_turns = {}
+    
+    for row in cursor.fetchall():
+        (req_id, provider_id, app_type, model, req_model, pricing_model,
+         inp, outp, cr, cc, in_cost, out_cost, cr_cost, cc_cost,
+         total_usd, latency, status, err_msg, session_id,
+         cost_mult, created_at, data_source) = row
+        
+        # 跳过 0 token 的请求
+        if (inp or 0) == 0 and (outp or 0) == 0 and (cr or 0) == 0:
+            continue
+        
+        # 确定模型名
+        model_key = pricing_model or model or req_model or 'unknown'
+        mp = match_model(model_key, exact, aliases)
+        if mp:
+            cost_cny = calculate_turn_cost(mp, {
+                'input_tokens': inp or 0,
+                'output_tokens': outp or 0,
+                'cache_read_input_tokens': cr or 0,
+                'cache_creation_input_tokens': cc or 0,
+            }, created_at * 1000)
+            matched_name = mp.get('display_name', model_key)
+        else:
+            # 用 CC Switch 自带的 USD 费用换算 (×7.2 汇率)
+            cost_cny = float(total_usd or 0) * 7.2
+            matched_name = model_key
+            unmatched.add(model_key)
+        
+        # 确定工具名
+        tool_map = {'claude': 'Claude Code', 'codex': 'Codex', 'gemini': 'Gemini'}
+        tool_name = tool_map.get(app_type, app_type or 'CC Switch')
+        
+        # 会话标识
+        sid = session_id or req_id[:8]
+        
+        dt = datetime.fromtimestamp(created_at, tz=TZ) if created_at else None
+        created_ms = created_at * 1000 if created_at else 0
+        
+        turn = {
+            'tool': tool_name,
+            'session_file_id': sid,
+            'model_id': model_key,
+            'matched_name': matched_name,
+            'input_tokens': inp or 0,
+            'output_tokens': outp or 0,
+            'cache_read_tokens': cr or 0,
+            'cache_create_tokens': cc or 0,
+            'cost_cny': cost_cny,
+            'created_ms': created_ms,
+            'created_dt': dt.strftime('%Y-%m-%d %H:%M:%S') if dt else '',
+            'duration_ms': latency or 0,
+            'skills': [],
+            'prompt_text': '',
+            'session_title': f'{tool_name} - {model_key}',
+            'session_first_text': '',
+            '_is_sub_agent': False,
+        }
+        
+        all_turns.append(turn)
+        
+        if sid not in session_turns:
+            session_turns[sid] = []
+        session_turns[sid].append(turn)
+    
+    # 构建会话
+    for sid, sturns in session_turns.items():
+        times = [t['created_ms'] for t in sturns if t['created_ms']]
+        first_ms = min(times) if times else 0
+        last_ms = max(times) if times else 0
+        s = {
+            'file_id': sid,
+            'tool': sturns[0]['tool'],
+            'turns': sturns,
+            'total_input': sum(t['input_tokens'] for t in sturns),
+            'total_output': sum(t['output_tokens'] for t in sturns),
+            'total_cache_read': sum(t['cache_read_tokens'] for t in sturns),
+            'total_cache_create': sum(t['cache_create_tokens'] for t in sturns),
+            'total_cost_cny': round(sum(t['cost_cny'] for t in sturns), 4),
+            'models_used': sorted(set(t['matched_name'] for t in sturns)),
+            'skills_used': [],
+            'first_text': sturns[0].get('session_title', ''),
+            'first_created': first_ms,
+            'last_created': last_ms,
+            'title': f"{sturns[0]['tool']} - {','.join(sorted(set(t['matched_name'] for t in sturns)))}",
+            'date': datetime.fromtimestamp(first_ms / 1000, tz=TZ).strftime('%Y-%m-%d') if first_ms else None,
+        }
+        _finalize_session(s)
+        sessions.append(s)
+    
+    conn.close()
+    return sessions, all_turns, unmatched
+
+
 # ── Session 最终化 ────────────────────────────────────
 def _finalize_session(s):
     if s["first_created"]:
@@ -796,6 +920,12 @@ def collect_all(pricing_data):
 
     # JoyCode
     s, t, u = collect_joycode(exact, aliases)
+    all_sessions.extend(s)
+    all_turns.extend(t)
+    all_unmatched.update(u)
+
+    # CC Switch (代理请求日志, 包含 Codex/Claude Code/Gemini 等)
+    s, t, u = collect_cc_switch(exact, aliases)
     all_sessions.extend(s)
     all_turns.extend(t)
     all_unmatched.update(u)
