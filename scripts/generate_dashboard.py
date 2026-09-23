@@ -1445,12 +1445,16 @@ function renderChart() {{
 
 function renderTurns() {{
   const startTs = getRangeTs(currentRange);
-  const turns = ALL_DATA.turns.filter(t => t.ts >= startTs);
+  let turns = ALL_DATA.turns.filter(t => t.ts >= startTs);
+  // 限制渲染行数防止崩溃，超200条只显示前200条
+  const maxRows = 200;
+  let truncated = turns.length > maxRows;
+  if (truncated) turns = turns.slice(0, maxRows);
   document.getElementById('turns-tbody').innerHTML = turns.map(t => {{
     const pe = esc(t.prompt_full||t.prompt||'(无文本)');
     const se = esc(t.session_name_full||t.session_name);
     return `<tr data-ts="${{t.ts}}"><td class="text-dim" style="white-space:nowrap;">${{t.dt}}</td><td>${{toolBadge(t.tool)}}</td><td><strong>${{esc(t.model)}}</strong></td><td class="session-cell" title="${{se}}">${{esc(t.session_name)}}</td><td class="prompt-cell" title="${{pe}}">${{esc(t.prompt)}}</td><td class="num">${{fmt(t.input)}}</td><td class="num">${{fmt(t.output)}}</td><td class="num">${{fmt(t.cache_r)}}</td><td class="num">${{fmt(t.total)}}</td><td class="num text-green">¥${{fmt4(t.cost)}}</td><td class="num text-dim">${{t.api_calls||1}}</td></tr>`;
-  }}).join('') || '<tr><td colspan="11" style="text-align:center;color:var(--text-dim);padding:30px;">该时间范围内暂无数据</td></tr>';
+  }}).join('') + (truncated ? `<tr><td colspan="11" style="text-align:center;color:var(--text-dim);padding:10px;">显示前 ${{maxRows}} 条，共 ${{ALL_DATA.turns.filter(t=>t.ts>=startTs).length}} 条。用搜索缩小范围查看更多。</td></tr>` : '') || '<tr><td colspan="11" style="text-align:center;color:var(--text-dim);padding:30px;">该时间范围内暂无数据</td></tr>';
 }}
 
 function renderSessions() {{
