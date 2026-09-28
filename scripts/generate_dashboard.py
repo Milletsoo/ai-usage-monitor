@@ -1177,6 +1177,8 @@ def generate_html(sessions, turns, unmatched_models, pricing_data, errors, model
         "cost_efficiency": cost_eff_js, "suggestions": sugg,
         "overspent": overspent_js,
     }, ensure_ascii=False)
+    # 防止 </script> 提前终止 HTML script 标签导致页面崩溃
+    all_data = all_data.replace("</script>", "<\\/script>").replace("</SCRIPT>", "<\\/SCRIPT>")
 
     total_sessions = len(sessions)
     total_turns = len(turns)
