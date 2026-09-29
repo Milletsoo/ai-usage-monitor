@@ -32,8 +32,16 @@
       "api_available": true,
       "pricing_type": "peak_offpeak",
       "peak_hours": "8-22",
-      "offpeak": { "input": 4.5, "cache_read": 0.45, "output": 13.5 },
-      "peak": { "input": 9.0, "cache_read": 0.9, "output": 27.0 }
+      "offpeak": {
+        "input": 4.5,
+        "cache_read": 0.45,
+        "output": 13.5
+      },
+      "peak": {
+        "input": 9.0,
+        "cache_read": 0.9,
+        "output": 27.0
+      }
     },
     {
       "id": "DeepSeek-V4-Pro",
@@ -121,8 +129,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 32000,
-      "low_tier": { "input": 4.0, "cache_read": 1.0, "output": 18.0 },
-      "high_tier": { "input": 6.0, "cache_read": 1.5, "output": 22.0 }
+      "low_tier": {
+        "input": 4.0,
+        "cache_read": 1.0,
+        "output": 18.0
+      },
+      "high_tier": {
+        "input": 6.0,
+        "cache_read": 1.5,
+        "output": 22.0
+      }
     },
     {
       "id": "GLM-5.1",
@@ -135,8 +151,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 32000,
-      "low_tier": { "input": 6.0, "cache_read": 1.3, "output": 24.0 },
-      "high_tier": { "input": 8.0, "cache_read": 2.0, "output": 28.0 }
+      "low_tier": {
+        "input": 6.0,
+        "cache_read": 1.3,
+        "output": 24.0
+      },
+      "high_tier": {
+        "input": 8.0,
+        "cache_read": 2.0,
+        "output": 28.0
+      }
     },
     {
       "id": "jd/glm-5.2",
@@ -194,8 +218,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 200000,
-      "low_tier": { "input": 14.4, "cache_read": 1.44, "output": 86.4 },
-      "high_tier": { "input": 28.8, "cache_read": 2.88, "output": 129.6 }
+      "low_tier": {
+        "input": 14.4,
+        "cache_read": 1.44,
+        "output": 86.4
+      },
+      "high_tier": {
+        "input": 28.8,
+        "cache_read": 2.88,
+        "output": 129.6
+      }
     },
     {
       "id": "GPT-5.5",
@@ -223,8 +255,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 18.0, "cache_read": 1.8, "output": 108.0 },
-      "high_tier": { "input": 36.0, "cache_read": 3.6, "output": 162.0 }
+      "low_tier": {
+        "input": 18.0,
+        "cache_read": 1.8,
+        "output": 108.0
+      },
+      "high_tier": {
+        "input": 36.0,
+        "cache_read": 3.6,
+        "output": 162.0
+      }
     },
     {
       "id": "GPT-5.3-codex",
@@ -312,8 +352,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 512000,
-      "low_tier": { "input": 4.2, "cache_read": 0.84, "output": 16.8 },
-      "high_tier": { "input": 8.4, "cache_read": 1.68, "output": 33.6 }
+      "low_tier": {
+        "input": 4.2,
+        "cache_read": 0.84,
+        "output": 16.8
+      },
+      "high_tier": {
+        "input": 8.4,
+        "cache_read": 1.68,
+        "output": 33.6
+      }
     },
     {
       "id": "Claude-Opus-5-hq",
@@ -358,8 +406,18 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 70.0, "cache_read": 7.0, "cache_create": 87.5, "output": 350.0 },
-      "high_tier": { "input": 140.0, "cache_read": 14.0, "cache_create": 175.0, "output": 525.0 }
+      "low_tier": {
+        "input": 70.0,
+        "cache_read": 7.0,
+        "cache_create": 87.5,
+        "output": 350.0
+      },
+      "high_tier": {
+        "input": 140.0,
+        "cache_read": 14.0,
+        "cache_create": 175.0,
+        "output": 525.0
+      }
     },
     {
       "id": "gt-6-as-a",
@@ -372,8 +430,18 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 70.0, "cache_read": 7.0, "cache_create": 87.5, "output": 350.0 },
-      "high_tier": { "input": 140.0, "cache_read": 14.0, "cache_create": 175.0, "output": 525.0 }
+      "low_tier": {
+        "input": 70.0,
+        "cache_read": 7.0,
+        "cache_create": 87.5,
+        "output": 350.0
+      },
+      "high_tier": {
+        "input": 140.0,
+        "cache_read": 14.0,
+        "cache_create": 175.0,
+        "output": 525.0
+      }
     },
     {
       "id": "gpt-5.6-sol",
@@ -386,8 +454,18 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 28.0, "cache_read": 2.8, "cache_create": 35.0, "output": 140.0 },
-      "high_tier": { "input": 56.0, "cache_read": 5.6, "cache_create": 70.0, "output": 210.0 }
+      "low_tier": {
+        "input": 28.0,
+        "cache_read": 2.8,
+        "cache_create": 35.0,
+        "output": 140.0
+      },
+      "high_tier": {
+        "input": 56.0,
+        "cache_read": 5.6,
+        "cache_create": 70.0,
+        "output": 210.0
+      }
     },
     {
       "id": "gpt-5.6-terra",
@@ -400,8 +478,18 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 14.0, "cache_read": 1.4, "cache_create": 17.5, "output": 84.0 },
-      "high_tier": { "input": 28.0, "cache_read": 2.8, "cache_create": 35.0, "output": 126.0 }
+      "low_tier": {
+        "input": 14.0,
+        "cache_read": 1.4,
+        "cache_create": 17.5,
+        "output": 84.0
+      },
+      "high_tier": {
+        "input": 28.0,
+        "cache_read": 2.8,
+        "cache_create": 35.0,
+        "output": 126.0
+      }
     },
     {
       "id": "gpt-5.6-luna",
@@ -414,8 +502,18 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 1.4, "cache_read": 0.14, "cache_create": 1.75, "output": 8.4 },
-      "high_tier": { "input": 2.8, "cache_read": 0.28, "cache_create": 3.5, "output": 12.6 }
+      "low_tier": {
+        "input": 1.4,
+        "cache_read": 0.14,
+        "cache_create": 1.75,
+        "output": 8.4
+      },
+      "high_tier": {
+        "input": 2.8,
+        "cache_read": 0.28,
+        "cache_create": 3.5,
+        "output": 12.6
+      }
     },
     {
       "id": "gpt-5.5-2026-04-24",
@@ -428,8 +526,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 35.0, "cache_read": 3.5, "output": 210.0 },
-      "high_tier": { "input": 70.0, "cache_read": 7.0, "output": 315.0 }
+      "low_tier": {
+        "input": 35.0,
+        "cache_read": 3.5,
+        "output": 210.0
+      },
+      "high_tier": {
+        "input": 70.0,
+        "cache_read": 7.0,
+        "output": 315.0
+      }
     },
     {
       "id": "gpt-5.4-2026-03-05",
@@ -442,8 +548,16 @@
       "api_available": true,
       "pricing_type": "tiered",
       "tier_threshold": 272000,
-      "low_tier": { "input": 17.5, "cache_read": 1.75, "output": 105.0 },
-      "high_tier": { "input": 35.0, "cache_read": 3.5, "output": 157.5 }
+      "low_tier": {
+        "input": 17.5,
+        "cache_read": 1.75,
+        "output": 105.0
+      },
+      "high_tier": {
+        "input": 35.0,
+        "cache_read": 3.5,
+        "output": 157.5
+      }
     },
     {
       "id": "gpt-5-2025-08-07",
@@ -500,6 +614,21 @@
       "input": 0,
       "cache_read": 0,
       "output": 0
+    },
+    {
+      "id": "JoyAI-Code-1.5",
+      "display_name": "JoyAI-Code-1.5",
+      "new_this_week": false,
+      "open_source": false,
+      "commercial": true,
+      "category": "大语言模型",
+      "tasks": "Coding Agent",
+      "api_available": true,
+      "pricing_type": "flat",
+      "input": 8.0,
+      "cache_read": 2.0,
+      "output": 28.0,
+      "_note": "暂用GLM-5.2同级价格估算, 需要用户提供实际价格"
     }
   ]
 }

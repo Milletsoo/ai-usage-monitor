@@ -339,14 +339,136 @@ def collect_claude_code(exact, aliases):
 
 # ── JoyCode 数据采集 ──────────────────────────────────
 def collect_joycode(exact, aliases):
-    task_history_dir = os.path.join(JOYCODE_TASKS_DIR, "task_history")
-    if not os.path.isdir(task_history_dir):
-        return [], [], set()
-
-    files = glob.glob(os.path.join(task_history_dir, "*.json"))
+    """采集 JoyCode 数据: 新版 rollout sessions + 旧版 task_history"""
     sessions = []
     all_turns = []
     unmatched = set()
+
+    # ── 新版: ~/.joycode/sessions/**/*.jsonl (Codex rollout 格式) ──
+    joycode_sessions_dir = os.path.join(HOME, ".joycode", "sessions")
+    if os.path.isdir(joycode_sessions_dir):
+        rollout_files = glob.glob(os.path.join(joycode_sessions_dir, "**", "*.jsonl"), recursive=True)
+        rollout_sessions = {}
+
+        for fpath in sorted(rollout_files):
+            try:
+                with open(fpath, "r", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            session_meta = None
+            last_tokens = None
+            prompts = []
+            model_provider = ""
+
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = obj.get("type", "")
+                p = obj.get("payload", {})
+
+                if t == "session_meta" and not session_meta:
+                    session_meta = p
+                    model_provider = p.get("model_provider", "")
+                elif t == "event_msg" and p.get("type") == "token_count":
+                    info = p.get("info", {})
+                    ttu = info.get("total_token_usage", {})
+                    if ttu:
+                        last_tokens = ttu
+                elif t == "response_item" and p.get("type") == "message" and p.get("role") == "user":
+                    for c in p.get("content", []):
+                        if isinstance(c, dict) and c.get("type") == "input_text":
+                            text = c.get("text", "")
+                            if text and not text.startswith("<"):
+                                prompts.append(text)
+
+            if not session_meta or not last_tokens:
+                continue
+
+            sid = session_meta.get("session_id", os.path.basename(fpath))
+            ts_str = session_meta.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                created_ms = int(dt.timestamp() * 1000)
+            except (ValueError, AttributeError):
+                created_ms = int(os.path.getmtime(fpath) * 1000)
+
+            cwd = session_meta.get("cwd", "")
+            prompt_text = prompts[0][:200] if prompts else f"JoyCode ({cwd[-20:]})" if cwd else "JoyCode"
+
+            # JoyCode 用 jdcloud 直连, session_meta 无模型名
+            # 检查 turn_context 是否有 model 信息
+            model_id = session_meta.get("model", "")
+            if not model_id:
+                # 从 session 文件中查找 turn_context 的 model
+                for line2 in lines:
+                    try:
+                        obj2 = json.loads(line2)
+                        if obj2.get("type") == "turn_context":
+                            model_id = obj2.get("payload", {}).get("model", "")
+                            if model_id:
+                                break
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+            if not model_id:
+                # 默认使用 CC Switch 路由快照或 JoyAI-Code-1.5
+                model_id = "JoyAI-Code-1.5"
+            mp = match_model(model_id, exact, aliases)
+            if mp:
+                matched_name = mp.get("display_name", model_id)
+                cost_cny = calculate_turn_cost(mp, {
+                    "input_tokens": last_tokens.get("input_tokens", 0),
+                    "output_tokens": last_tokens.get("output_tokens", 0),
+                    "cache_read_input_tokens": last_tokens.get("cached_input_tokens", 0),
+                    "cache_creation_input_tokens": last_tokens.get("cache_write_input_tokens", 0),
+                }, created_ms)
+            else:
+                matched_name = model_id
+                unmatched.add(model_id)
+                cost_cny = 0.0
+
+            turn = {
+                "tool": "JoyCode", "session_file_id": sid,
+                "model_id": model_id, "matched_name": matched_name,
+                "input_tokens": last_tokens.get("input_tokens", 0),
+                "output_tokens": last_tokens.get("output_tokens", 0),
+                "cache_read_tokens": last_tokens.get("cached_input_tokens", 0),
+                "cache_create_tokens": last_tokens.get("cache_write_input_tokens", 0),
+                "cost_cny": cost_cny, "created_ms": created_ms,
+                "created_dt": datetime.fromtimestamp(created_ms / 1000, tz=TZ).strftime("%Y-%m-%d %H:%M:%S") if created_ms else "",
+                "duration_ms": 0, "skills": [],
+                "prompt_text": prompt_text,
+                "session_title": prompt_text[:60],
+                "session_first_text": prompt_text,
+                "_is_sub_agent": False,
+            }
+
+            rollout_sessions[sid] = {
+                "file_id": sid, "tool": "JoyCode", "turns": [turn],
+                "total_input": turn["input_tokens"], "total_output": turn["output_tokens"],
+                "total_cache_read": turn["cache_read_tokens"],
+                "total_cache_create": turn["cache_create_tokens"],
+                "total_cost_cny": cost_cny, "models_used": {matched_name},
+                "skills_used": set(), "first_text": prompt_text,
+                "first_created": created_ms, "last_created": created_ms,
+                "title": prompt_text[:80] if prompt_text else sid, "date": None,
+            }
+            all_turns.append(turn)
+
+        for s in rollout_sessions.values():
+            _finalize_session(s)
+            sessions.append(s)
+
+    # ── 旧版: task_history (保留兼容) ──
+    task_history_dir = os.path.join(JOYCODE_TASKS_DIR, "task_history")
+
+    files = glob.glob(os.path.join(task_history_dir, "*.json")) if os.path.isdir(task_history_dir) else []
 
     for fpath in sorted(files):
         with open(fpath, "r", encoding="utf-8") as fh:
