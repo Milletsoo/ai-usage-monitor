@@ -420,12 +420,16 @@ def collect_joycode(exact, aliases):
                 # 默认使用 CC Switch 路由快照或 JoyAI-Code-1.5
                 model_id = "JoyAI-Code-1.5"
             mp = match_model(model_id, exact, aliases)
+            # 计算费用前先算出实际新增输入（不含缓存命中部分）
+            _raw_in = last_tokens.get("input_tokens", 0)
+            _cached = last_tokens.get("cached_input_tokens", 0)
+            _new_input = _raw_in - _cached
             if mp:
                 matched_name = mp.get("display_name", model_id)
                 cost_cny = calculate_turn_cost(mp, {
-                    "input_tokens": last_tokens.get("input_tokens", 0),
+                    "input_tokens": _new_input,
                     "output_tokens": last_tokens.get("output_tokens", 0),
-                    "cache_read_input_tokens": last_tokens.get("cached_input_tokens", 0),
+                    "cache_read_input_tokens": _cached,
                     "cache_creation_input_tokens": last_tokens.get("cache_write_input_tokens", 0),
                 }, created_ms)
             else:
@@ -433,13 +437,31 @@ def collect_joycode(exact, aliases):
                 unmatched.add(model_id)
                 cost_cny = 0.0
 
+            # input_tokens 是累计总量（包含缓存读取），需要减去 cached 得到新增输入
+            raw_input = last_tokens.get("input_tokens", 0)
+            cached = last_tokens.get("cached_input_tokens", 0)
+            cache_write = last_tokens.get("cache_write_input_tokens", 0)
+            output = last_tokens.get("output_tokens", 0)
+            new_input = raw_input - cached  # 实际新增输入（不含缓存命中部分）
+
+            # 同一 session 可能有多个 rollout 文件（分段记录），取最大值去重
+            existing = rollout_sessions.get(sid)
+            if existing:
+                # 已有该 session，只保留累计值更大的（用 raw_input 比较）
+                prev_turn = existing["turns"][0]
+                prev_raw = prev_turn.get("_raw_input", 0)
+                if raw_input <= prev_raw:
+                    continue  # 当前文件的累计值更小，跳过
+                # 移除旧的 turn
+                all_turns.remove(prev_turn)
+
             turn = {
                 "tool": "JoyCode", "session_file_id": sid,
                 "model_id": model_id, "matched_name": matched_name,
-                "input_tokens": last_tokens.get("input_tokens", 0),
-                "output_tokens": last_tokens.get("output_tokens", 0),
-                "cache_read_tokens": last_tokens.get("cached_input_tokens", 0),
-                "cache_create_tokens": last_tokens.get("cache_write_input_tokens", 0),
+                "input_tokens": new_input,
+                "output_tokens": output,
+                "cache_read_tokens": cached,
+                "cache_create_tokens": cache_write,
                 "cost_cny": cost_cny, "created_ms": created_ms,
                 "created_dt": datetime.fromtimestamp(created_ms / 1000, tz=TZ).strftime("%Y-%m-%d %H:%M:%S") if created_ms else "",
                 "duration_ms": 0, "skills": [],
@@ -447,13 +469,14 @@ def collect_joycode(exact, aliases):
                 "session_title": prompt_text[:60],
                 "session_first_text": prompt_text,
                 "_is_sub_agent": False,
+                "_raw_input": raw_input,
             }
 
             rollout_sessions[sid] = {
                 "file_id": sid, "tool": "JoyCode", "turns": [turn],
-                "total_input": turn["input_tokens"], "total_output": turn["output_tokens"],
-                "total_cache_read": turn["cache_read_tokens"],
-                "total_cache_create": turn["cache_create_tokens"],
+                "total_input": new_input, "total_output": output,
+                "total_cache_read": cached,
+                "total_cache_create": cache_write,
                 "total_cost_cny": cost_cny, "models_used": {matched_name},
                 "skills_used": set(), "first_text": prompt_text,
                 "first_created": created_ms, "last_created": created_ms,
