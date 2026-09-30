@@ -366,6 +366,17 @@ def collect_claude_code(exact, aliases):
 
 
 # ── JoyCode 数据采集 ──────────────────────────────────
+def _is_system_injected(text):
+    """判断 rollout 中的 user message 是否为系统注入而非用户真实输入"""
+    if text.startswith("<"):
+        return True  # <environment_context> / <turn_aborted> / <user_instructions> 等
+    if text.startswith("# AGENTS.md instructions"):
+        return True  # Codex 系工具注入的 AGENTS.md 指令
+    if text.startswith("# ") and "INSTRUCTIONS" in text[:100]:
+        return True  # 其他指令头部变体
+    return False
+
+
 def _collect_codex_rollout(sessions_dir, tool_name, default_model, exact, aliases):
     """通用的 Codex rollout 格式采集器（JoyCode / 小财神 / 其他 Codex 系工具共用）
 
@@ -413,7 +424,8 @@ def _collect_codex_rollout(sessions_dir, tool_name, default_model, exact, aliase
                 for c in p.get("content", []):
                     if isinstance(c, dict) and c.get("type") == "input_text":
                         text = c.get("text", "")
-                        if text and not text.startswith("<"):
+                        # 过滤系统注入消息（非用户真实输入）
+                        if text and not _is_system_injected(text):
                             prompts.append(text)
 
         if not session_meta or not last_tokens:
@@ -428,7 +440,8 @@ def _collect_codex_rollout(sessions_dir, tool_name, default_model, exact, aliase
             created_ms = int(os.path.getmtime(fpath) * 1000)
 
         cwd = session_meta.get("cwd", "")
-        prompt_text = prompts[0][:200] if prompts else f"{tool_name} ({cwd[-20:]})" if cwd else tool_name
+        # 用最近的真实用户 prompt（rollout 内可能有多轮对话）
+        prompt_text = prompts[-1][:200] if prompts else f"{tool_name} ({cwd[-20:]})" if cwd else tool_name
 
         # 查找模型: session_meta → turn_context → 默认值
         model_id = session_meta.get("model", "")
