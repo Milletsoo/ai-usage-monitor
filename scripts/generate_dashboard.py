@@ -1386,7 +1386,7 @@ def generate_html(sessions, turns, unmatched_models, pricing_data, errors, model
     gen_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
     # Tool colors
-    tool_colors = {"Proma": "#4f9cf9", "Claude Code": "#fb923c", "JoyCode": "#34d399"}
+    tool_colors = {"Proma": "#4f9cf9", "Claude Code": "#fb923c", "JoyCode": "#34d399", "Codex": "#a78bfa", "XiaocaiShen": "#f472b6"}
 
     # 准备数据
     turns_js = []
@@ -1525,6 +1525,8 @@ tr:hover {{ background:rgba(79,156,249,0.05); }}
 .tool-Proma {{ background:rgba(79,156,249,0.15);color:#4f9cf9; }}
 .tool-ClaudeCode {{ background:rgba(251,146,60,0.15);color:#fb923c; }}
 .tool-JoyCode {{ background:rgba(52,211,153,0.15);color:#34d399; }}
+.tool-Codex {{ background:rgba(167,139,250,0.15);color:#a78bfa; }}
+.tool-XiaocaiShen {{ background:rgba(244,114,182,0.15);color:#f472b6; }}
 .chart-container {{ background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:20px;margin-bottom:24px; }}
 .chart-container h3 {{ font-size:15px;margin-bottom:16px; }}
 .chart-scroll {{ overflow-x:auto;overflow-y:visible;padding-top:30px; }}
