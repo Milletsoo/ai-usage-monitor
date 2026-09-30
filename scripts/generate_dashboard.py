@@ -572,7 +572,7 @@ def collect_joycode(exact, aliases):
 CC_SWITCH_DB = os.path.join(HOME, ".cc-switch", "cc-switch.db")
 
 
-def collect_cc_switch(exact, aliases):
+def collect_cc_switch(exact, aliases, pricing_data):
     """从 CC Switch 数据库采集代理请求日志，合并 Codex prompt 并按时间窗口聚合"""
     if not os.path.isfile(CC_SWITCH_DB):
         return [], [], set()
@@ -633,7 +633,9 @@ def collect_cc_switch(exact, aliases):
             continue
         
         # CC Switch 自带 USD 费用，直接用（比刊例价更准确，含折扣等）
-        cost_cny = float(total_usd or 0) * 7.2
+        # 汇率从 pricing.json 的 _meta.exchange_rate 读取，默认 7.2
+        exchange_rate = pricing_data.get("_meta", {}).get("exchange_rate", 7.2)
+        cost_cny = float(total_usd or 0) * exchange_rate
         
         # 模型名：优先用 pricing_model，匹配价格表获取 display_name
         model_key = pricing_model or model or req_model or 'unknown'
@@ -1111,7 +1113,7 @@ def collect_all(pricing_data):
     all_unmatched.update(u)
 
     # CC Switch (代理请求日志, 包含 Codex/Claude Code/Gemini 等)
-    s, t, u = collect_cc_switch(exact, aliases)
+    s, t, u = collect_cc_switch(exact, aliases, pricing_data)
     all_sessions.extend(s)
     all_turns.extend(t)
     all_unmatched.update(u)
