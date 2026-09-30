@@ -29,6 +29,34 @@ PROMA_SESSIONS_JSON = os.path.join(HOME, ".proma", "agent-sessions.json")
 CLAUDE_PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 JOYCODE_TASKS_DIR = os.path.join(HOME, ".joycode", "default-workspace", "joycode.joycoder-editor")
 
+# 可扩展数据源：添加新工具时在此注册
+def _detect_extra_sources():
+    """自动检测本机其他 AI Coding 工具数据源，返回 {name: info_dict}"""
+    sources = {}
+
+    # 小财神工作台（内嵌 Codex 引擎，rollout 格式 + invocation sqlite）
+    xs_codex = os.path.join(HOME, ".xiaocaishen", "codex", "sessions")
+    if os.path.isdir(xs_codex):
+        sources["XiaocaiShen"] = {"type": "codex_rollout", "dir": xs_codex}
+
+    # IronClaw / .imclaw（llm_calls sqlite，未来有数据后自动生效）
+    imclaw_base = os.path.join(HOME, ".imclaw")
+    if os.path.isdir(imclaw_base):
+        for root, dirs, files in os.walk(imclaw_base):
+            if "ironclaw.db" in files:
+                sources.setdefault("IronClaw", {"type": "ironclaw_sqlite", "dir": root})
+                break
+
+    # JoyClaw / OpenClaw（检测常见目录，目前无标准日志格式，预留）
+    for claw_dir_name in [".joyclaw", ".openclaw", ".claw"]:
+        claw_dir = os.path.join(HOME, claw_dir_name)
+        if os.path.isdir(claw_dir):
+            sources.setdefault("ClawAgent", {"type": "claw_generic", "dir": claw_dir})
+
+    return sources
+
+EXTRA_SOURCES = _detect_extra_sources()
+
 
 # ── 模型名称匹配 ──────────────────────────────────────
 def build_model_matcher(pricing_data):
@@ -338,6 +366,151 @@ def collect_claude_code(exact, aliases):
 
 
 # ── JoyCode 数据采集 ──────────────────────────────────
+def _collect_codex_rollout(sessions_dir, tool_name, default_model, exact, aliases):
+    """通用的 Codex rollout 格式采集器（JoyCode / 小财神 / 其他 Codex 系工具共用）
+
+    格式: session_meta / event_msg(token_count) / response_item / turn_context
+    """
+    sessions = []
+    all_turns = []
+    unmatched = set()
+
+    rollout_files = glob.glob(os.path.join(sessions_dir, "**", "*.jsonl"), recursive=True)
+    rollout_sessions = {}
+
+    for fpath in sorted(rollout_files):
+        try:
+            with open(fpath, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        session_meta = None
+        last_tokens = None
+        prompts = []
+        model_provider = ""
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type", "")
+            p = obj.get("payload", {})
+
+            if t == "session_meta" and not session_meta:
+                session_meta = p
+                model_provider = p.get("model_provider", "")
+            elif t == "event_msg" and p.get("type") == "token_count":
+                info = p.get("info", {})
+                ttu = info.get("total_token_usage", {})
+                if ttu:
+                    last_tokens = ttu
+            elif t == "response_item" and p.get("type") == "message" and p.get("role") == "user":
+                for c in p.get("content", []):
+                    if isinstance(c, dict) and c.get("type") == "input_text":
+                        text = c.get("text", "")
+                        if text and not text.startswith("<"):
+                            prompts.append(text)
+
+        if not session_meta or not last_tokens:
+            continue
+
+        sid = session_meta.get("session_id", os.path.basename(fpath))
+        ts_str = session_meta.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            created_ms = int(dt.timestamp() * 1000)
+        except (ValueError, AttributeError):
+            created_ms = int(os.path.getmtime(fpath) * 1000)
+
+        cwd = session_meta.get("cwd", "")
+        prompt_text = prompts[0][:200] if prompts else f"{tool_name} ({cwd[-20:]})" if cwd else tool_name
+
+        # 查找模型: session_meta → turn_context → 默认值
+        model_id = session_meta.get("model", "")
+        if not model_id:
+            for line2 in lines:
+                try:
+                    obj2 = json.loads(line2)
+                    if obj2.get("type") == "turn_context":
+                        model_id = obj2.get("payload", {}).get("model", "")
+                        if model_id:
+                            break
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        if not model_id:
+            model_id = default_model
+
+        mp = match_model(model_id, exact, aliases)
+        raw_input = last_tokens.get("input_tokens", 0)
+        cached = last_tokens.get("cached_input_tokens", 0)
+        cache_write = last_tokens.get("cache_write_input_tokens", 0)
+        output = last_tokens.get("output_tokens", 0)
+        new_input = raw_input - cached  # 实际新增输入（不含缓存命中部分）
+
+        if mp:
+            matched_name = mp.get("display_name", model_id)
+            cost_cny = calculate_turn_cost(mp, {
+                "input_tokens": new_input,
+                "output_tokens": output,
+                "cache_read_input_tokens": cached,
+                "cache_creation_input_tokens": cache_write,
+            }, created_ms)
+        else:
+            matched_name = model_id
+            unmatched.add(model_id)
+            cost_cny = 0.0
+
+        # 同一 session 可能有多个 rollout 文件（分段记录），取最大值去重
+        existing = rollout_sessions.get(sid)
+        if existing:
+            prev_turn = existing["turns"][0]
+            prev_raw = prev_turn.get("_raw_input", 0)
+            if raw_input <= prev_raw:
+                continue
+            all_turns.remove(prev_turn)
+
+        turn = {
+            "tool": tool_name, "session_file_id": sid,
+            "model_id": model_id, "matched_name": matched_name,
+            "input_tokens": new_input,
+            "output_tokens": output,
+            "cache_read_tokens": cached,
+            "cache_create_tokens": cache_write,
+            "cost_cny": cost_cny, "created_ms": created_ms,
+            "created_dt": datetime.fromtimestamp(created_ms / 1000, tz=TZ).strftime("%Y-%m-%d %H:%M:%S") if created_ms else "",
+            "duration_ms": 0, "skills": [],
+            "prompt_text": prompt_text,
+            "session_title": prompt_text[:60],
+            "session_first_text": prompt_text,
+            "_is_sub_agent": False,
+            "_raw_input": raw_input,
+        }
+
+        rollout_sessions[sid] = {
+            "file_id": sid, "tool": tool_name, "turns": [turn],
+            "total_input": new_input, "total_output": output,
+            "total_cache_read": cached,
+            "total_cache_create": cache_write,
+            "total_cost_cny": cost_cny, "models_used": {matched_name},
+            "skills_used": set(), "first_text": prompt_text,
+            "first_created": created_ms, "last_created": created_ms,
+            "title": prompt_text[:80] if prompt_text else sid, "date": None,
+        }
+        all_turns.append(turn)
+
+    for s in rollout_sessions.values():
+        _finalize_session(s)
+        sessions.append(s)
+
+    return sessions, all_turns, unmatched
+
+
+# ── JoyCode 数据采集 ──────────────────────────────────
 def collect_joycode(exact, aliases):
     """采集 JoyCode 数据: 新版 rollout sessions + 旧版 task_history"""
     sessions = []
@@ -347,146 +520,10 @@ def collect_joycode(exact, aliases):
     # ── 新版: ~/.joycode/sessions/**/*.jsonl (Codex rollout 格式) ──
     joycode_sessions_dir = os.path.join(HOME, ".joycode", "sessions")
     if os.path.isdir(joycode_sessions_dir):
-        rollout_files = glob.glob(os.path.join(joycode_sessions_dir, "**", "*.jsonl"), recursive=True)
-        rollout_sessions = {}
-
-        for fpath in sorted(rollout_files):
-            try:
-                with open(fpath, "r", encoding="utf-8") as fh:
-                    lines = fh.readlines()
-            except (OSError, UnicodeDecodeError):
-                continue
-
-            session_meta = None
-            last_tokens = None
-            prompts = []
-            model_provider = ""
-
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                t = obj.get("type", "")
-                p = obj.get("payload", {})
-
-                if t == "session_meta" and not session_meta:
-                    session_meta = p
-                    model_provider = p.get("model_provider", "")
-                elif t == "event_msg" and p.get("type") == "token_count":
-                    info = p.get("info", {})
-                    ttu = info.get("total_token_usage", {})
-                    if ttu:
-                        last_tokens = ttu
-                elif t == "response_item" and p.get("type") == "message" and p.get("role") == "user":
-                    for c in p.get("content", []):
-                        if isinstance(c, dict) and c.get("type") == "input_text":
-                            text = c.get("text", "")
-                            if text and not text.startswith("<"):
-                                prompts.append(text)
-
-            if not session_meta or not last_tokens:
-                continue
-
-            sid = session_meta.get("session_id", os.path.basename(fpath))
-            ts_str = session_meta.get("timestamp", "")
-            try:
-                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                created_ms = int(dt.timestamp() * 1000)
-            except (ValueError, AttributeError):
-                created_ms = int(os.path.getmtime(fpath) * 1000)
-
-            cwd = session_meta.get("cwd", "")
-            prompt_text = prompts[0][:200] if prompts else f"JoyCode ({cwd[-20:]})" if cwd else "JoyCode"
-
-            # JoyCode 用 jdcloud 直连, session_meta 无模型名
-            # 检查 turn_context 是否有 model 信息
-            model_id = session_meta.get("model", "")
-            if not model_id:
-                # 从 session 文件中查找 turn_context 的 model
-                for line2 in lines:
-                    try:
-                        obj2 = json.loads(line2)
-                        if obj2.get("type") == "turn_context":
-                            model_id = obj2.get("payload", {}).get("model", "")
-                            if model_id:
-                                break
-                    except (json.JSONDecodeError, KeyError):
-                        continue
-            if not model_id:
-                # 默认使用 CC Switch 路由快照或 JoyAI-Code-1.5
-                model_id = "JoyAI-Code-1.5"
-            mp = match_model(model_id, exact, aliases)
-            # 计算费用前先算出实际新增输入（不含缓存命中部分）
-            _raw_in = last_tokens.get("input_tokens", 0)
-            _cached = last_tokens.get("cached_input_tokens", 0)
-            _new_input = _raw_in - _cached
-            if mp:
-                matched_name = mp.get("display_name", model_id)
-                cost_cny = calculate_turn_cost(mp, {
-                    "input_tokens": _new_input,
-                    "output_tokens": last_tokens.get("output_tokens", 0),
-                    "cache_read_input_tokens": _cached,
-                    "cache_creation_input_tokens": last_tokens.get("cache_write_input_tokens", 0),
-                }, created_ms)
-            else:
-                matched_name = model_id
-                unmatched.add(model_id)
-                cost_cny = 0.0
-
-            # input_tokens 是累计总量（包含缓存读取），需要减去 cached 得到新增输入
-            raw_input = last_tokens.get("input_tokens", 0)
-            cached = last_tokens.get("cached_input_tokens", 0)
-            cache_write = last_tokens.get("cache_write_input_tokens", 0)
-            output = last_tokens.get("output_tokens", 0)
-            new_input = raw_input - cached  # 实际新增输入（不含缓存命中部分）
-
-            # 同一 session 可能有多个 rollout 文件（分段记录），取最大值去重
-            existing = rollout_sessions.get(sid)
-            if existing:
-                # 已有该 session，只保留累计值更大的（用 raw_input 比较）
-                prev_turn = existing["turns"][0]
-                prev_raw = prev_turn.get("_raw_input", 0)
-                if raw_input <= prev_raw:
-                    continue  # 当前文件的累计值更小，跳过
-                # 移除旧的 turn
-                all_turns.remove(prev_turn)
-
-            turn = {
-                "tool": "JoyCode", "session_file_id": sid,
-                "model_id": model_id, "matched_name": matched_name,
-                "input_tokens": new_input,
-                "output_tokens": output,
-                "cache_read_tokens": cached,
-                "cache_create_tokens": cache_write,
-                "cost_cny": cost_cny, "created_ms": created_ms,
-                "created_dt": datetime.fromtimestamp(created_ms / 1000, tz=TZ).strftime("%Y-%m-%d %H:%M:%S") if created_ms else "",
-                "duration_ms": 0, "skills": [],
-                "prompt_text": prompt_text,
-                "session_title": prompt_text[:60],
-                "session_first_text": prompt_text,
-                "_is_sub_agent": False,
-                "_raw_input": raw_input,
-            }
-
-            rollout_sessions[sid] = {
-                "file_id": sid, "tool": "JoyCode", "turns": [turn],
-                "total_input": new_input, "total_output": output,
-                "total_cache_read": cached,
-                "total_cache_create": cache_write,
-                "total_cost_cny": cost_cny, "models_used": {matched_name},
-                "skills_used": set(), "first_text": prompt_text,
-                "first_created": created_ms, "last_created": created_ms,
-                "title": prompt_text[:80] if prompt_text else sid, "date": None,
-            }
-            all_turns.append(turn)
-
-        for s in rollout_sessions.values():
-            _finalize_session(s)
-            sessions.append(s)
+        s, t, u = _collect_codex_rollout(joycode_sessions_dir, "JoyCode", "JoyAI-Code-1.5", exact, aliases)
+        sessions.extend(s)
+        all_turns.extend(t)
+        unmatched.update(u)
 
     # ── 旧版: task_history (保留兼容) ──
     task_history_dir = os.path.join(JOYCODE_TASKS_DIR, "task_history")
@@ -570,6 +607,80 @@ def collect_joycode(exact, aliases):
 
 # ── CC Switch 数据采集 ───────────────────────────────
 CC_SWITCH_DB = os.path.join(HOME, ".cc-switch", "cc-switch.db")
+
+
+def _collect_ironclaw(db_path, tool_name, exact, aliases):
+    """IronClaw / .imclaw 数据采集（llm_calls 表，当前多为空，有数据后自动生效）"""
+    sessions = []
+    all_turns = []
+    unmatched = set()
+    if not os.path.isfile(db_path):
+        return sessions, all_turns, unmatched
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='llm_calls'")
+        if not cur.fetchone():
+            conn.close()
+            return sessions, all_turns, unmatched
+        cur.execute("""
+            SELECT conversation_id, provider, model, input_tokens, output_tokens, cost, purpose, created_at
+            FROM llm_calls ORDER BY created_at
+        """)
+        for row in cur.fetchall():
+            conv_id, provider, model_id, inp, outp, cost, purpose, created_at = row
+            if not model_id:
+                continue
+            created_ms = int(created_at * 1000) if created_at and created_at < 1e12 else int(created_at or 0)
+            mp = match_model(model_id, exact, aliases)
+            if mp:
+                matched_name = mp.get("display_name", model_id)
+                cost_cny = float(cost) if cost else calculate_turn_cost(mp, {
+                    "input_tokens": inp or 0, "output_tokens": outp or 0,
+                }, created_ms)
+            else:
+                matched_name = model_id
+                unmatched.add(model_id)
+                cost_cny = 0.0
+            turn = {
+                "tool": tool_name, "session_file_id": conv_id or "ironclaw",
+                "model_id": model_id, "matched_name": matched_name,
+                "input_tokens": inp or 0, "output_tokens": outp or 0,
+                "cache_read_tokens": 0, "cache_create_tokens": 0,
+                "cost_cny": cost_cny, "created_ms": created_ms,
+                "created_dt": datetime.fromtimestamp(created_ms / 1000, tz=TZ).strftime("%Y-%m-%d %H:%M:%S") if created_ms else "",
+                "duration_ms": 0, "skills": [],
+                "prompt_text": purpose or "IronClaw",
+                "session_title": purpose or conv_id or tool_name,
+                "session_first_text": purpose or "",
+            }
+            all_turns.append(turn)
+        conn.close()
+    except (sqlite3.Error, OSError):
+        pass
+    # 按 conversation 聚合 session
+    conv_turns = {}
+    for t in all_turns:
+        conv_turns.setdefault(t["session_file_id"], []).append(t)
+    for conv_id, turns in conv_turns.items():
+        first = turns[0]
+        session_data = {
+            "file_id": conv_id, "tool": tool_name, "turns": turns,
+            "total_input": sum(t["input_tokens"] for t in turns),
+            "total_output": sum(t["output_tokens"] for t in turns),
+            "total_cache_read": 0, "total_cache_create": 0,
+            "total_cost_cny": sum(t["cost_cny"] for t in turns),
+            "models_used": {t["matched_name"] for t in turns},
+            "skills_used": set(),
+            "first_text": first.get("prompt_text", ""),
+            "first_created": min(t["created_ms"] for t in turns if t["created_ms"]),
+            "last_created": max(t["created_ms"] for t in turns if t["created_ms"]),
+            "title": first.get("session_title", conv_id), "date": None,
+        }
+        _finalize_session(session_data)
+        sessions.append(session_data)
+    return sessions, all_turns, unmatched
 
 
 def collect_cc_switch(exact, aliases, pricing_data):
@@ -1117,6 +1228,24 @@ def collect_all(pricing_data):
     all_sessions.extend(s)
     all_turns.extend(t)
     all_unmatched.update(u)
+
+    # 可扩展数据源（自动检测本机其他 AI Coding 工具）
+    for name, info in EXTRA_SOURCES.items():
+        try:
+            if info["type"] == "codex_rollout":
+                # 小财神等内嵌 Codex 引擎的工具
+                s, t, u = _collect_codex_rollout(info["dir"], name, "jd/deepseek-v4-flash-0731", exact, aliases)
+                all_sessions.extend(s)
+                all_turns.extend(t)
+                all_unmatched.update(u)
+            elif info["type"] == "ironclaw_sqlite":
+                s, t, u = _collect_ironclaw(os.path.join(info["dir"], "ironclaw.db"), name, exact, aliases)
+                all_sessions.extend(s)
+                all_turns.extend(t)
+                all_unmatched.update(u)
+            # claw_generic: 暂无标准日志格式，预留
+        except Exception as e:
+            print(f"  数据源 {name} 采集失败: {e}")
 
     # 合并子 Agent 到父会话
     all_sessions = merge_sub_agents(all_sessions, child_to_parent, parent_titles)
