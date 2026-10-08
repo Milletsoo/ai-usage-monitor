@@ -1909,6 +1909,8 @@ def main():
     _resolve_core_paths()  # 通用探测器解析核心路径
     parser = argparse.ArgumentParser(description="AI Coding 平台 Token 用量监控看板")
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT)
+    parser.add_argument("--dump-turns", metavar="JSON_PATH",
+                        help="采集完成后把 turns 聚合数据写入 JSON（供云端上报）")
     parser.add_argument("--pricing", "-p", default=DEFAULT_PRICING_FILE)
     args = parser.parse_args()
 
@@ -1941,6 +1943,24 @@ def main():
     cost_efficiency, suggestions = analyze_cost_efficiency(turns, pricing_data)
     overspent = analyze_overspending(sessions, turns, session_tools, threshold=10.0)
     
+    # 供云端上报的导出（--dump-turns）：原始 turns 聚合，prompt 只留 50 字摘要
+    if getattr(args, "dump_turns", None):
+        try:
+            export = [{
+                "tool": t.get("tool", ""), "model": t.get("matched_name", ""),
+                "session_id": t.get("session_file_id", ""), "turn_ts": t.get("created_ms", 0),
+                "input_tokens": t.get("input_tokens", 0), "output_tokens": t.get("output_tokens", 0),
+                "cache_read_tokens": t.get("cache_read_tokens", 0),
+                "cache_create_tokens": t.get("cache_create_tokens", 0),
+                "cost_cny": round(t.get("cost_cny", 0), 4),
+                "prompt_digest": (t.get("prompt_text") or "")[:50],  # 只上传 50 字摘要
+            } for t in turns]
+            with open(args.dump_turns, "w", encoding="utf-8") as df:
+                json.dump(export, df, ensure_ascii=False)
+            print(f"turns 已导出: {args.dump_turns} ({len(export)} 条)")
+        except OSError as e:
+            print(f"turns 导出失败: {e}")
+
     html = generate_html(sessions, turns, unmatched, pricing_data, errors, model_tools, session_tools)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html)
