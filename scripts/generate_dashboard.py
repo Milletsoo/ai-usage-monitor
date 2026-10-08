@@ -9,6 +9,7 @@ import glob
 import sys
 import argparse
 from datetime import datetime, timezone, timedelta
+from detect_sources import detect_sources  # 通用数据源探测器（路径扫描+格式指纹）
 from collections import defaultdict
 
 if sys.platform == "win32":
@@ -28,31 +29,52 @@ PROMA_SESSIONS_DIR = os.path.join(HOME, ".proma", "agent-sessions")
 PROMA_SESSIONS_JSON = os.path.join(HOME, ".proma", "agent-sessions.json")
 CLAUDE_PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 JOYCODE_TASKS_DIR = os.path.join(HOME, ".joycode", "default-workspace", "joycode.joycoder-editor")
+JOYCODE_SESSIONS_DIR = os.path.join(HOME, ".joycode", "sessions")
 
-# 可扩展数据源：添加新工具时在此注册
+# 通用数据源探测：路径扫描 + 格式指纹（跨平台，不依赖固定清单）
+# 运行时动态发现本机 AI 工具数据源，工具名无关，按日志格式路由到对应解析器
+_DETECTED = None
+
+def _get_detected():
+    """懒加载并缓存探测器结果"""
+    global _DETECTED
+    if _DETECTED is None:
+        try:
+            _DETECTED = detect_sources()
+        except Exception:
+            _DETECTED = {}
+    return _DETECTED
+
+
 def _detect_extra_sources():
-    """自动检测本机其他 AI Coding 工具数据源，返回 {name: info_dict}"""
+    """从探测器结果中提取非核心工具的 codex_rollout / ironclaw 数据源"""
     sources = {}
-
-    # 小财神工作台（内嵌 Codex 引擎，rollout 格式 + invocation sqlite）
-    xs_codex = os.path.join(HOME, ".xiaocaishen", "codex", "sessions")
-    if os.path.isdir(xs_codex):
-        sources["XiaocaiShen"] = {"type": "codex_rollout", "dir": xs_codex}
-
-    # IronClaw / .imclaw（llm_calls sqlite，未来有数据后自动生效）
-    imclaw_base = os.path.join(HOME, ".imclaw")
-    if os.path.isdir(imclaw_base):
-        for root, dirs, files in os.walk(imclaw_base):
-            if "ironclaw.db" in files:
-                sources.setdefault("IronClaw", {"type": "ironclaw_sqlite", "dir": root})
+    detected = _get_detected()
+    known_rollout_roots = {
+        os.path.normcase(os.path.join(HOME, ".joycode", "sessions")),
+        os.path.normcase(os.path.join(HOME, ".codex", "sessions")),
+    }
+    for info in detected.get("codex_rollout", {}).get("roots", set()):
+        norm = os.path.normcase(info.replace("/", os.sep))
+        # 核心工具（JoyCode/Codex）走各自的固定采集器，其余作为额外数据源
+        if norm not in known_rollout_roots and os.path.isdir(info):
+            # 工具名取 sessions 容器的上溯目录，跳过引擎名（codex 等目录只是引擎子目录）
+            parts = info.replace("/", os.sep).split(os.sep)
+            tool_name = "CodexTool"
+            for part in reversed(parts[:-1]):  # 不含 "sessions" 本身
+                if part.startswith(".") and len(part) > 1:
+                    tool_name = part.lstrip(".")
+                    break
+                if part.lower() in ("codex", "sessions", "projects"):
+                    continue
+                tool_name = part
                 break
-
-    # JoyClaw / OpenClaw（检测常见目录，目前无标准日志格式，预留）
-    for claw_dir_name in [".joyclaw", ".openclaw", ".claw"]:
-        claw_dir = os.path.join(HOME, claw_dir_name)
-        if os.path.isdir(claw_dir):
-            sources.setdefault("ClawAgent", {"type": "claw_generic", "dir": claw_dir})
-
+            display = {"xiaocaishen": "XiaocaiShen", "codex": "Codex"}.get(tool_name.lower(), tool_name.capitalize())
+            sources[display] = {"type": "codex_rollout", "dir": info}
+    for db_root in detected.get("ironclaw_db", {}).get("roots", set()):
+        db_file = os.path.join(db_root.replace("/", os.sep), "ironclaw.db")
+        if os.path.isfile(db_file):
+            sources.setdefault("IronClaw", {"type": "ironclaw_sqlite", "dir": db_root})
     return sources
 
 EXTRA_SOURCES = _detect_extra_sources()
@@ -531,9 +553,8 @@ def collect_joycode(exact, aliases):
     unmatched = set()
 
     # ── 新版: ~/.joycode/sessions/**/*.jsonl (Codex rollout 格式) ──
-    joycode_sessions_dir = os.path.join(HOME, ".joycode", "sessions")
-    if os.path.isdir(joycode_sessions_dir):
-        s, t, u = _collect_codex_rollout(joycode_sessions_dir, "JoyCode", "JoyAI-Code-1.5", exact, aliases)
+    if os.path.isdir(JOYCODE_SESSIONS_DIR):
+        s, t, u = _collect_codex_rollout(JOYCODE_SESSIONS_DIR, "JoyCode", "JoyAI-Code-1.5", exact, aliases)
         sessions.extend(s)
         all_turns.extend(t)
         unmatched.update(u)
@@ -1207,6 +1228,36 @@ def merge_turns_by_prompt(turns):
 
 
 # ── 统一采集 ──────────────────────────────────────────
+def _resolve_core_paths():
+    """从探测器结果解析核心数据源路径，探测失败时回退到固定路径"""
+    global PROMA_SESSIONS_DIR, PROMA_SESSIONS_JSON, CLAUDE_PROJECTS_DIR, JOYCODE_SESSIONS_DIR
+    detected = _get_detected()
+
+    # Proma
+    for root in detected.get("proma_jsonl", {}).get("roots", set()):
+        p = root.replace("/", os.sep)
+        if os.path.isdir(p):
+            PROMA_SESSIONS_DIR = p
+            meta = os.path.join(os.path.dirname(p), "agent-sessions.json")
+            if os.path.isfile(meta):
+                PROMA_SESSIONS_JSON = meta
+            break
+
+    # Claude Code
+    for root in detected.get("claude_jsonl", {}).get("roots", set()):
+        p = root.replace("/", os.sep)
+        if os.path.isdir(p):
+            CLAUDE_PROJECTS_DIR = p
+            break
+
+    # JoyCode rollout（新版 sessions 目录）
+    for root in detected.get("codex_rollout", {}).get("roots", set()):
+        p = root.replace("/", os.sep)
+        if os.path.normcase(os.path.join(HOME, ".joycode", "sessions")) == os.path.normcase(p):
+            JOYCODE_SESSIONS_DIR = p
+            break
+
+
 def collect_all(pricing_data):
     exact, aliases = build_model_matcher(pricing_data)
     proma_titles = load_proma_session_titles()
@@ -1855,6 +1906,7 @@ setTimeout(function() {{ location.reload(); }}, 30000);
 
 
 def main():
+    _resolve_core_paths()  # 通用探测器解析核心路径
     parser = argparse.ArgumentParser(description="AI Coding 平台 Token 用量监控看板")
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT)
     parser.add_argument("--pricing", "-p", default=DEFAULT_PRICING_FILE)
